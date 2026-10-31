@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>她 · 人工抽检</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark">她</div>
+      <div>
+        <h1>群聊人工抽检</h1>
+        <p>看上下文，判断这条回复像不像一个正常人。</p>
+      </div>
+    </div>
+    <div class="progress-wrap">
+      <div class="progress-text"><span id="done">0</span> / <span id="total">0</span> 已评</div>
+      <div class="progress"><i id="bar"></i></div>
+      <button class="finish" id="finish">结束服务并训练</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="review" id="review">
+      <div class="skeleton" id="loading">正在取一条待评用例…</div>
+
+      <article class="case" id="case" hidden>
+        <div class="case-meta">
+          <span class="pill" id="case-id">#0</span>
+          <span class="pill ghost" id="case-gid">群</span>
+          <span class="pill ghost" id="case-type">回复</span>
+        </div>
+
+        <h2 class="section-title">最近对话</h2>
+        <div class="thread" id="context"></div>
+
+        <div class="focus-grid">
+          <div class="block">
+            <div class="block-label">触发消息</div>
+            <div class="block-text" id="trigger"></div>
+          </div>
+          <div class="block reply">
+            <div class="block-label">她的回复</div>
+            <div class="block-text" id="reply"></div>
+          </div>
+        </div>
+
+        <div class="note-wrap">
+          <textarea id="note" maxlength="300" rows="2"
+            placeholder="备注（可选）：为什么像/不像，或她哪里没说对"></textarea>
+        </div>
+
+        <div class="labels" id="labels">
+          <button data-label="human_like" class="lb like"><b>像人</b><small>时机、内容、语气都自然</small><kbd>1</kbd></button>
+          <button data-label="ok" class="lb ok"><b>还行</b><small>没大问题，但不算很像</small><kbd>2</kbd></button>
+          <button data-label="cold" class="lb cold"><b>冷淡</b><small>太短、太敷衍、接得生硬</small><kbd>3</kbd></button>
+          <button data-label="hallucinated" class="lb hall"><b>不懂装懂</b><small>没掌握话题就硬发表意见</small><kbd>4</kbd></button>
+          <button data-label="should_not" class="lb should"><b>不该回</b><small>这条根本不该接</small><kbd>5</kbd></button>
+          <button data-label="skip" class="lb skip"><b>跳过</b><small>不适合评</small><kbd>6</kbd></button>
+        </div>
+        <p class="hint">点标签直接提交并进入下一条；数字键 1~6 也可以。</p>
+      </article>
+
+      <div class="empty" id="empty" hidden>
+        <div class="empty-mark">✓</div>
+        <h2>这一批评完了</h2>
+        <p>可以导出 CSV，或者回 QQ 发 <code>/评测 采集 7</code> 再采一批。</p>
+        <a class="btn" href="/api/export.csv">导出 labels.csv</a>
+      </div>
+
+      <div class="error" id="error" hidden></div>
+    </section>
+
+    <aside class="side">
+      <section class="panel">
+        <div class="panel-head">
+          <h3>进度</h3>
+          <span class="muted" id="pending">0 待评</span>
+        </div>
+        <div class="stats" id="stats"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h3>最近评过</h3>
+          <button class="link" id="refresh">刷新</button>
+        </div>
+        <ul class="recent" id="recent"><li class="muted">还没有记录</li></ul>
+      </section>
+
+      <section class="panel tips">
+        <h3>怎么判</h3>
+        <p><b>不该回</b>：A/B 在聊自己的，或者话题跟她无关。</p>
+        <p><b>不懂装懂</b>：没看懂上下文、没掌握信息就下结论。</p>
+        <p><b>冷淡</b>：别人认真问，她只丢十个字以内。</p>
+        <p><b>像人</b>：不抢话，接得住，有自己的观点。</p>
+        <a class="btn ghost-btn" href="/api/export.csv">导出 CSV</a>
+      </section>
+    </aside>
+  </main>
+
+  <div class="finished-screen" id="finished" hidden>
+    <div class="finish-card">
+      <div class="empty-mark">✓</div>
+      <h2>评测结束，开始整理训练材料</h2>
+      <p>服务已停止。训练报告生成在：</p>
+      <code>data/eval/training-report.md</code>
+      <p class="muted">这次不是微调模型，而是把你的标签整理成偏好数据和规则建议；39 条不足以做可靠的 fine-tune。</p>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

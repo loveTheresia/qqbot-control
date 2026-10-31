@@ -1,0 +1,34 @@
+# runtime / private
+.env
+config/.env
+data/
+logs/
+run/
+qq/
+napcat/
+home/
+.venv/
+venv/
+
+# databases / archives
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.zip
+
+# generated private persona data
+persona/distill-*.json
+persona/card.draft.md
+persona/examples.draft.jsonl
+data/eval/
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
