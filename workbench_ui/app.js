@@ -39,6 +39,7 @@ async function switchTab(name) {
     if (name === "changes") await loadChanges();
     if (name === "release") await loadRelease();
     if (name === "github") await loadGithub();
+    if (name === "params") await loadParams();
   }
 }
 
@@ -87,6 +88,7 @@ async function loadRules() {
   setLoading("#tab-rules");
   try {
     const d = await api("/api/workbench/rules");
+    const b = await api("/api/workbench/builtin");
     const curVer = d.release?.policy_version ?? 0;
     const draft = (d.rules || []).filter(r => r.status === "active" && (r.version || 0) !== curVer).length;
     const rows = (d.rules || []).map(r => `
@@ -105,8 +107,8 @@ async function loadRules() {
       </div>
       <div class="card">
         <div class="panel-head"><h2>补充规则</h2>
-          <button class="primary" id="publish-policy">发布当前规则</button></div>
-        <p class="hint">这些规则追加在人格/RULES 之后；冲突时以人格核心为准。发布后 bot 下一条消息就会读到新版本，不需要重启。</p>
+          <button class="primary" id="publish-policy">本地生效（试运行）</button></div>
+        <p class="hint">这些规则追加在人格/RULES 之后；冲突时以人格核心为准。这里的按钮只让本地 bot 立即生效，<b>不走 GitHub</b>；正式发布请去 GitHub 页。</p>
         ${draft >= 1 ? `<div class="guide" style="border-color:#e6c9a8;background:#fdf6ea">现在有 <b>${draft}</b> 条未发布规则。先发布观察，再改下一条；后端会阻止同时添加第二条未发布规则。</div>` : ""}
         <form class="form-grid" id="rule-form" style="margin-top:12px">
           <div><label>作用域</label><select name="scope"><option value="group">群聊</option><option value="private">私聊</option><option value="all">全部</option></select></div>
@@ -116,6 +118,11 @@ async function loadRules() {
         </form>
         <table class="table"><thead><tr><th>ID / 范围</th><th>规则</th><th>优先级</th><th>状态</th><th></th></tr></thead><tbody>${rows}</tbody></table>
       </div>
+      <details class="card panel"><summary><b>内置规则（只读，不能在这里改）</b></summary>
+        <p class="hint">这些是 bot.py 里硬编码的规则，包含之前的反馈校准（RULES 22 / 群规）。工作台只能追加补充规则，不能覆盖它们。</p>
+        <h4>RULES</h4><pre>${esc(b.rules)}</pre>
+        <h4>GROUP_RULES</h4><pre>${esc(b.group)}</pre>
+      </details>
       <div class="card panel"><h3>当前发布</h3><p class="hint">policy v${d.release?.policy_version ?? "—"} · ${esc(d.release?.note || "无备注")} · 未发布规则 ${draft}</p></div>`;
     $("#rule-form").addEventListener("submit", async (e) => {
       e.preventDefault(); const f = new FormData(e.target);
@@ -220,6 +227,13 @@ async function loadChanges() {
       <td><select data-change-select="${c.id}">${["draft","approved","canary","released","rolled_back"].map(s => `<option value="${s}" ${s === c.status ? "selected" : ""}>${s}</option>`).join("")}</select></td></tr>`).join("")
       || `<tr><td colspan="5" class="empty">还没有变更单。一次只推一个变量。</td></tr>`;
     $("#tab-changes").innerHTML = `
+      <div class="guide">
+        <b>三个东西的关系：</b>
+        <b>变更单</b>记录“为什么要改、验收指标、怎么回滚”，本身不生效；
+        <b>规则 / Canon</b>是“改什么”；
+        <b>GitHub 合并</b>是“正式发布”。
+        本地规则页的“本地生效”只是试运行，不走 GitHub。
+      </div>
       <div class="card">
         <div class="panel-head"><h2>变更单</h2><span class="muted">draft → approved → canary → released</span></div>
         <form id="change-form" class="form-grid">
@@ -249,6 +263,27 @@ async function loadChanges() {
   } catch (e) { $("#tab-changes").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
 }
 
+
+
+async function loadParams() {
+  setLoading("#tab-params");
+  try {
+    const d = await api("/api/workbench/params");
+    const sections = Object.entries(d.groups || {}).map(([name, rows]) => `
+      <div class="card panel"><h3>${esc(name)}</h3>
+        <table class="table"><thead><tr><th>参数</th><th>当前值</th><th>说明</th></tr></thead><tbody>
+        ${rows.map(r => `<tr><td><code>${esc(r.key)}</code></td><td><b>${esc(r.value ?? "—")}</b></td><td>${esc(r.desc)}</td></tr>`).join("")}
+        </tbody></table></div>`).join("");
+    $("#tab-params").innerHTML = `
+      <div class="guide">
+        <b>怎么改：</b>带 <code>/参数</code> 的键可以在 QQ 私聊里热调，例如 <code>/参数 REPLY_DELAY_MAX=3.2</code>；
+        其余改 <code>config/.env</code> 后重启 bot。工作台目前只展示，避免误改。
+        <br><b>没有单一“热情值”：</b>热情 = 回复概率 + 主动插话 + 提问补全共同作用，要分开调。
+      </div>
+      ${sections}
+      <div class="card panel"><h3>可直接热调的键</h3><div class="chips">${(d.hot || []).map(k => `<span class="chip">${esc(k)}</span>`).join("")}</div></div>`;
+  } catch (e) { $("#tab-params").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+}
 
 async function loadGithub() {
   setLoading("#tab-github");
