@@ -42,6 +42,16 @@ python -m venv .venv
 
 浏览器打开 `http://127.0.0.1:8099/`。评测页在 `/eval`。
 
+工作台里的 **GitHub** 页可以：
+
+- 提交 `control/` 到新分支；
+- 创建 PR；
+- 轮询 `validate` 检查；
+- 通过后点“合并并发布”；
+- 自动打 `control-vN` tag，并以 GitHub 上的 policy 写回本地。
+
+需要在 `config/.env` 配置 `GH_REPO`、`GH_TOKEN`（fine-grained PAT，最小权限）。
+
 > 这个项目依赖本地 QQ / NapCat 环境，不是开箱即用的 SaaS。
 
 ## 控制规则

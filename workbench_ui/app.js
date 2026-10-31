@@ -38,6 +38,7 @@ async function switchTab(name) {
     if (name === "pipeline") await loadPipeline();
     if (name === "changes") await loadChanges();
     if (name === "release") await loadRelease();
+    if (name === "github") await loadGithub();
   }
 }
 
@@ -218,6 +219,56 @@ async function loadChanges() {
       } catch (err) { toast("失败：" + err.message); }
     }));
   } catch (e) { $("#tab-changes").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+}
+
+
+async function loadGithub() {
+  setLoading("#tab-github");
+  try {
+    const d = await api("/api/workbench/github");
+    const configured = d.configured;
+    const checks = (d.checks || []).map(c => {
+      const ok = c.conclusion === "success";
+      const bad = c.conclusion && c.conclusion !== "success";
+      return `<span class="chip ${ok ? "good" : bad ? "bad" : ""}">${esc(c.name)} · ${esc(c.conclusion || c.status || "pending")}</span>`;
+    }).join("") || `<span class="muted">还没有检查</span>`;
+    const pr = d.pr;
+    const prLine = pr ? `#${pr.number} · ${esc(pr.state || "open")} · ${esc(pr.branch || "")}` : "当前没有待合并 PR";
+    const allGreen = (d.checks || []).length > 0 && (d.checks || []).every(c => c.conclusion === "success");
+    const canMerge = configured && pr && pr.state === "open" && allGreen;
+    $("#tab-github").innerHTML = `
+      <div class="grid two">
+        <div class="card kpi"><b>${configured ? "已连接" : "未配置"}</b><span>${esc(d.repo || "GH_REPO 未设置")}</span><small>分支 ${esc(d.branch || "main")}</small></div>
+        <div class="card kpi"><b>${esc(d.head ? d.head.slice(0, 7) : "—")}</b><span>当前 commit</span><small>${esc(d.message || "")}</small></div>
+      </div>
+      <div class="card panel">
+        <div class="panel-head"><h2>控制面发布</h2><span class="muted">${prLine}</span></div>
+        <p class="hint">流程：提交当前 control 到分支 → 创建 PR → GitHub Actions 运行 validate → 检查通过后，点“合并并发布”。合并后以 GitHub 上的 policy 为准写回本地，bot 下一条消息生效。</p>
+        <div class="chips" style="margin:10px 0">${checks}</div>
+        <div class="actions">
+          <button class="ghost" id="gh-refresh">刷新状态</button>
+          <button class="primary" id="gh-pr" ${!configured || pr ? "disabled" : ""}>提交并创建 PR</button>
+          <button class="primary" id="gh-merge" ${canMerge ? "" : "disabled"}>合并并发布</button>
+        </div>
+        ${!configured ? `<p class="hint">在 <code>config/.env</code> 配置 <code>GH_REPO</code> 和 <code>GH_TOKEN</code> 后刷新。</p>` : ""}
+        ${pr ? `<p class="hint">PR 地址：<a href="${esc(pr.url || "#")}" target="_blank" rel="noreferrer">${esc(pr.url || "")}</a></p>` : ""}
+      </div>
+      <div class="card panel"><h3>边界</h3><p class="hint">v0.1 只同步 <code>control/policy.json</code> 和 <code>release.json</code>；Canon/评测数据仍在本地。合并前必须 validate 通过；没有通过时按钮不可用。</p></div>`;
+    $("#gh-refresh").addEventListener("click", loadGithub);
+    $("#gh-pr")?.addEventListener("click", async () => {
+      try {
+        await api("/api/workbench/github/pr", { method: "POST" });
+        toast("PR 已创建，等待 validate"); state.loaded.github = false; await loadGithub();
+      } catch (e) { toast("失败：" + e.message); }
+    });
+    $("#gh-merge")?.addEventListener("click", async () => {
+      if (!confirm("合并 PR 并打 tag？合并后本地 policy 会以 GitHub 为准。")) return;
+      try {
+        const r = await api("/api/workbench/github/merge", { method: "POST" });
+        toast(`已发布 ${r.tag}`); state.loaded.github = false; await loadGithub(); state.loaded.dashboard = false;
+      } catch (e) { toast("失败：" + e.message); }
+    });
+  } catch (e) { $("#tab-github").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
 }
 
 async function loadRelease() {
