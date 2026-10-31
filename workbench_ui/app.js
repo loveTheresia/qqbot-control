@@ -131,7 +131,8 @@ async function loadCanon() {
     const d = await api("/api/workbench/canon");
     const rows = (d.canon || []).map(c => `
       <tr><td><b>${esc(c.title)}</b><div class="sub">${esc(c.type)} · ${esc(c.source || "无来源")}</div></td>
-      <td>${esc(c.summary || "")}</td><td>${esc(c.tags || "")}</td><td>${badge(c.status)}</td></tr>`).join("")
+      <td>${esc(c.summary || "")}</td><td>${esc(c.tags || "")}</td><td>${badge(c.status)}</td>
+      <td><button class="mini" data-canon-status="${c.id}" data-status="${c.status === "active" || c.status === "approved" ? "draft" : "approved"}">${c.status === "active" || c.status === "approved" ? "撤回" : "审核通过"}</button></td></tr>`).join("")
       || `<tr><td colspan="4" class="empty">还没有 canon。先录 3~5 条她真的会聊到的作品/概念。</td></tr>`;
     $("#tab-canon").innerHTML = `
       <div class="card">
@@ -145,8 +146,14 @@ async function loadCanon() {
           <div class="wide"><label>摘要</label><textarea name="summary" maxlength="1000" placeholder="它讲什么、在什么背景下、最容易误读成什么。"></textarea></div>
           <div class="wide actions"><button class="primary" type="submit">添加 Canon</button></div>
         </form>
-        <table class="table" style="margin-top:12px"><thead><tr><th>条目</th><th>摘要</th><th>标签</th><th>状态</th></tr></thead><tbody>${rows}</tbody></table>
+        <table class="table" style="margin-top:12px"><thead><tr><th>条目</th><th>摘要</th><th>标签</th><th>状态</th><th></th></tr></thead><tbody>${rows}</tbody></table>
       </div>`;
+    $$("[data-canon-status]").forEach(b => b.addEventListener("click", async () => {
+      try {
+        await api("/api/workbench/canon/status", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: Number(b.dataset.canonStatus), status: b.dataset.status }) });
+        toast("Canon 状态已更新"); state.loaded.canon = false; await loadCanon();
+      } catch (err) { toast("失败：" + err.message); }
+    }));
     $("#canon-form").addEventListener("submit", async (e) => {
       e.preventDefault(); const f = new FormData(e.target);
       try {
