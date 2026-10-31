@@ -21,6 +21,7 @@ DeepSeek × QQ 机器人（NapCat / OneBot v11 正向 WebSocket 客户端）
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import random
 import re
@@ -29,6 +30,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import urllib.error
 import html as html_lib
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
@@ -61,6 +63,13 @@ def load_env(path: Path) -> dict:
 
 ENV = load_env(ROOT / "config" / ".env")
 POLICY_ENABLED = int(ENV.get("POLICY_ENABLED", "1"))
+CANON_ENABLED = int(ENV.get("CANON_ENABLED", "1"))
+CANON_MAX_ITEMS = int(ENV.get("CANON_MAX_ITEMS", "1"))
+CANON_SYNC = int(ENV.get("CANON_SYNC", "1"))
+CONTROL_SYNC = int(ENV.get("CONTROL_SYNC", "1"))
+CONTROL_SYNC_SEC = int(ENV.get("CONTROL_SYNC_SEC", "120"))
+GH_REPO = ENV.get("GH_REPO", "")
+CANON_FILE = CONTROL_DIR / "canon.json"
 API_KEY = ENV.get("DEEPSEEK_API_KEY", "")
 BASE_URL = ENV.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
 MODEL = ENV.get("DEEPSEEK_MODEL", "deepseek-chat")
@@ -1665,6 +1674,47 @@ def policy_block() -> str:
         return ""
 
 
+_CANON_CACHE = {"mtime": 0.0, "items": []}
+
+
+def canon_block(query: str) -> str:
+    """从 control/canon.json 里按标题/标签/二元组召回最多 N 条。"""
+    if not CANON_ENABLED or not query:
+        return ""
+    try:
+        st = CANON_FILE.stat()
+        if st.st_mtime != _CANON_CACHE["mtime"]:
+            data = json.loads(CANON_FILE.read_text(encoding="utf-8"))
+            _CANON_CACHE["items"] = [x for x in data.get("items", [])
+                                     if isinstance(x, dict)
+                                     and x.get("status", "active") in ("active", "approved")]
+            _CANON_CACHE["mtime"] = st.st_mtime
+        q2 = {query[i:i + 2] for i in range(max(0, len(query) - 1))}
+        picked = []
+        for it in _CANON_CACHE["items"]:
+            title = str(it.get("title", ""))
+            summary = str(it.get("summary", ""))
+            tags = str(it.get("tags", ""))
+            hay = title + summary + tags
+            hit = any(t.strip() and t.strip() in query for t in tags.replace("，", ",").split(","))
+            if not hit:
+                h2 = {hay[i:i + 2] for i in range(max(0, len(hay) - 1))}
+                hit = len(q2 & h2) >= 2
+            if hit:
+                picked.append(it)
+            if len(picked) >= CANON_MAX_ITEMS:
+                break
+        if not picked:
+            return ""
+        lines = ["【Canon 参考（只取观点，不照搬原话，不改变人格）】"]
+        for it in picked:
+            lines.append(f"- {str(it.get('title', ''))[:60]}：{str(it.get('summary', ''))[:180]}")
+        return "\n".join(lines)
+    except Exception as e:
+        log_line(f"[canon] 读取失败 {type(e).__name__}: {e}")
+        return ""
+
+
 def build_messages(conv: str, text: str, gid: int | None = None, master: bool = False,
                    force_active: bool = False, uid: int | None = None,
                    nickname: str = "", exclude_group_id: int | None = None,
@@ -1673,6 +1723,9 @@ def build_messages(conv: str, text: str, gid: int | None = None, master: bool = 
     pb = policy_block()
     if pb:
         system += "\n\n" + pb
+    cb = canon_block(text)
+    if cb:
+        system += "\n\n" + cb
     if quoted:
         system += ("\n\n【对方引用了你刚才说的话】\n" + quoted[:300] +
                    "\n对方是在针对这句话回应。先接住这个点，再回答；不要答非所问。")
@@ -3728,6 +3781,78 @@ def collect_eval_cases(days: int = 7, limit: int = 40) -> int:
     return added
 
 
+CONTROL_SYNC_TASK: asyncio.Task | None = None
+APPLIED_FILE = CONTROL_DIR / "applied.json"
+
+
+def _gh_get(url: str) -> bytes:
+    headers = {"User-Agent": "qqbot-control-sync", "Accept": "application/vnd.github+json"}
+    token = ENV.get("GH_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.read()
+
+
+def control_sync_once() -> None:
+    """拉取最新 control-v* tag 的 policy/canon，校验后原子替换本地快照。"""
+    if not CONTROL_SYNC or not GH_REPO:
+        return
+    try:
+        raw = _gh_get(f"https://api.github.com/repos/{GH_REPO}/git/matching-refs/tags/control-v")
+        refs = json.loads(raw.decode() or "[]")
+        best = None
+        for r in refs:
+            ref = str(r.get("ref", ""))
+            m = re.search(r"/control-v(\d+)$", ref)
+            if m:
+                n = int(m.group(1))
+                if best is None or n > best[0]:
+                    best = (n, ref.split("/")[-1])
+        if not best:
+            return
+        tag = best[1]
+        applied = {}
+        try:
+            applied = json.loads(APPLIED_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        if applied.get("tag") == tag:
+            return
+        def _content(path: str) -> bytes:
+            raw = json.loads(_gh_get(
+                f"https://api.github.com/repos/{GH_REPO}/contents/{path}?ref={tag}").decode())
+            return base64.b64decode(raw["content"])
+
+        policy = json.loads(_content("control/policy.json").decode())
+        canon = json.loads(_content("control/canon.json").decode())
+        if not isinstance(policy.get("version"), int) or not isinstance(policy.get("rules"), list):
+            raise ValueError("policy 结构不合法")
+        if not isinstance(canon.get("items"), list):
+            raise ValueError("canon 结构不合法")
+        POLICY_FILE.write_text(json.dumps(policy, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        CANON_FILE.write_text(json.dumps(canon, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        APPLIED_FILE.write_text(json.dumps({"tag": tag, "version": policy["version"],
+                                             "applied_at": int(time.time())},
+                                            ensure_ascii=False, indent=2), encoding="utf-8")
+        log_line(f"[control] applied {tag} policy={policy['version']} "
+                 f"rules={len(policy['rules'])} canon={len(canon['items'])}")
+    except Exception as e:
+        log_line(f"[control] sync failed {type(e).__name__}: {e}")
+
+
+async def control_sync_loop() -> None:
+    if not CONTROL_SYNC or not GH_REPO:
+        return
+    while True:
+        try:
+            await asyncio.to_thread(control_sync_once)
+        except Exception as e:
+            log_line(f"[control] loop {type(e).__name__}: {e}")
+        await asyncio.sleep(max(60, CONTROL_SYNC_SEC))
+
+
 NIGHTLY_TASK: asyncio.Task | None = None
 
 
@@ -3784,8 +3909,9 @@ async def nightly_style_loop() -> None:
 
 
 async def main_run() -> None:
-    global NIGHTLY_TASK
+    global NIGHTLY_TASK, CONTROL_SYNC_TASK
     NIGHTLY_TASK = asyncio.create_task(nightly_style_loop())
+    CONTROL_SYNC_TASK = asyncio.create_task(control_sync_loop())
     await BOT.run()
 
 

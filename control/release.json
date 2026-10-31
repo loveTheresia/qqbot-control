@@ -1,6 +1,7 @@
 {
+  "control_version": 2,
   "policy_version": 1,
   "canon_version": 1793458492,
-  "updated_at": 1793458492,
-  "note": "工作台 v0.1 基线"
+  "updated_at": 1793458618,
+  "note": "control-v2 canon sync"
 }

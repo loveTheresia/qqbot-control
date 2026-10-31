@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -25,6 +26,7 @@ import eval_ui as ev  # noqa: E402
 
 DB = ROOT / "data" / "bot.db"
 POLICY = ROOT / "control" / "policy.json"
+CANON_FILE = ROOT / "control" / "canon.json"
 RELEASE = ROOT / "control" / "release.json"
 UI = ROOT / "workbench_ui"
 
@@ -162,12 +164,29 @@ def github_status() -> dict:
     return out
 
 
+def next_control_version() -> int:
+    try:
+        refs = gh_request("GET", "/git/matching-refs/tags/control-v")
+        n = 0
+        for r in refs:
+            m = re.search(r"/control-v(\d+)$", str(r.get("ref", "")))
+            if m:
+                n = max(n, int(m.group(1)))
+        return n + 1
+    except Exception:
+        try:
+            return int(release_info().get("control_version", 0)) + 1
+        except Exception:
+            return 1
+
+
 def github_create_pr() -> dict:
     cfg = load_env()
     repo = cfg.get("GH_REPO", "")
     branch = cfg.get("GH_BRANCH", "main")
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
     ver = int(policy.get("version", 0))
+    ctrl_ver = next_control_version()
     existing = get_state("gh_pr")
     if existing:
         pr = json.loads(existing)
@@ -176,11 +195,15 @@ def github_create_pr() -> dict:
     head = gh_request("GET", f"/git/ref/heads/{branch}")["object"]["sha"]
     base_commit = gh_request("GET", f"/git/commits/{head}")
     tree_sha = base_commit["tree"]["sha"]
+    cfile = canon_file()
     files = {
         "control/policy.json": policy,
-        "control/release.json": {"policy_version": ver, "canon_version": 0,
+        "control/release.json": {"control_version": ctrl_ver,
+                                 "policy_version": ver,
+                                 "canon_version": cfile["version"],
                                  "updated_at": int(time.time()),
                                  "note": policy.get("note", "")},
+        "control/canon.json": cfile,
     }
     blobs = []
     for path, obj in files.items():
@@ -193,18 +216,19 @@ def github_create_pr() -> dict:
     author = {"name": cfg.get("GH_AUTHOR_NAME", "workbench"),
               "email": cfg.get("GH_AUTHOR_EMAIL", "workbench@users.noreply.github.com")}
     commit = gh_request("POST", "/git/commits", {
-        "message": f"control: v{ver}", "tree": tree["sha"],
+        "message": f"control: v{ctrl_ver}", "tree": tree["sha"],
         "parents": [head], "author": author, "committer": author})
-    new_branch = f"control/v{ver}-{int(time.time())}"
+    new_branch = f"control/v{ctrl_ver}-{int(time.time())}"
     gh_request("POST", "/git/refs",
                {"ref": f"refs/heads/{new_branch}", "sha": commit["sha"]})
     body = (f"自动提交 control v{ver}。\n\n"
             f"- 规则数：{len(policy.get('rules', []))}\n"
             f"- 备注：{policy.get('note', '')}\n")
     pr = gh_request("POST", "/pulls", {
-        "title": f"control: v{ver}", "head": new_branch, "base": branch, "body": body})
+        "title": f"control: v{ctrl_ver}", "head": new_branch, "base": branch, "body": body})
     pr_state = {"number": pr["number"], "url": pr["html_url"], "branch": new_branch,
-                "head": commit["sha"], "version": ver, "state": "open"}
+                "head": commit["sha"], "version": ver,
+                "control_version": ctrl_ver, "state": "open"}
     set_state("gh_pr", json.dumps(pr_state, ensure_ascii=False))
     audit("github_pr", str(pr["number"]), new_branch)
     return {"ok": True, "pr": pr_state}
@@ -218,6 +242,14 @@ def github_pull() -> dict:
     if not isinstance(remote.get("version"), int) or not isinstance(remote.get("rules"), list):
         raise RuntimeError("远端 policy 结构不合法，拒绝覆盖")
     POLICY.write_text(json.dumps(remote, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        ccontent = gh_request("GET", f"/contents/control/canon.json?ref={branch}")
+        remote_canon = json.loads(base64.b64decode(ccontent["content"]).decode())
+        CANON_FILE.write_text(json.dumps(remote_canon, ensure_ascii=False, indent=2) + "\n",
+                              encoding="utf-8")
+        sync_canon_db(remote_canon)
+    except Exception as e:
+        print(f"[github] canon pull: {e}")
     rel = release_info()
     rel.update({"policy_version": remote["version"], "updated_at": int(time.time()),
                 "note": f"github pull {branch}"})
@@ -234,7 +266,7 @@ def github_merge() -> dict:
     res = gh_request("PUT", f"/pulls/{pr['number']}/merge",
                      {"merge_method": "squash"})
     sha = res.get("sha", "")
-    tag = f"control-v{pr.get('version', 0)}"
+    tag = f"control-v{pr.get('control_version', pr.get('version', 0))}"
     try:
         gh_request("POST", "/git/refs", {"ref": f"refs/tags/{tag}", "sha": sha})
     except Exception as e:
@@ -246,8 +278,17 @@ def github_merge() -> dict:
     content = gh_request("GET", f"/contents/control/policy.json?ref={sha}")
     remote = json.loads(base64.b64decode(content["content"]).decode())
     POLICY.write_text(json.dumps(remote, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        ccontent = gh_request("GET", f"/contents/control/canon.json?ref={sha}")
+        remote_canon = json.loads(base64.b64decode(ccontent["content"]).decode())
+        CANON_FILE.write_text(json.dumps(remote_canon, ensure_ascii=False, indent=2) + "\n",
+                              encoding="utf-8")
+        sync_canon_db(remote_canon)
+    except Exception as e:
+        print(f"[github] canon sync: {e}")
     rel = release_info()
-    rel.update({"policy_version": remote.get("version", pr.get("version", 0)),
+    rel.update({"control_version": pr.get("control_version", 0),
+                "policy_version": remote.get("version", pr.get("version", 0)),
                 "updated_at": int(time.time()), "note": f"github {tag}"})
     RELEASE.write_text(json.dumps(rel, ensure_ascii=False, indent=2), encoding="utf-8")
     set_state("gh_pr", "")
@@ -312,6 +353,37 @@ def rules() -> list[dict]:
     with conn() as c:
         rows = c.execute("SELECT * FROM policy_rules ORDER BY status='active' DESC, priority, id").fetchall()
     return [dict(r) for r in rows]
+
+
+def canon_file() -> dict:
+    with conn() as c:
+        rows = c.execute("SELECT * FROM canon_items ORDER BY id").fetchall()
+    items = [{"id": r["id"], "type": r["type"], "title": r["title"],
+              "source": r["source"], "summary": r["summary"], "tags": r["tags"],
+              "status": r["status"]} for r in rows]
+    return {"version": int(time.time()), "updated_at": int(time.time()), "items": items}
+
+
+def sync_canon_db(data: dict) -> None:
+    with conn() as c:
+        for it in data.get("items", []):
+            if not isinstance(it, dict) or not it.get("title"):
+                continue
+            title = str(it["title"])[:120]
+            row = c.execute("SELECT id FROM canon_items WHERE title=?", (title,)).fetchone()
+            if row:
+                c.execute("UPDATE canon_items SET type=?, source=?, summary=?, tags=?, "
+                          "status=?, updated_at=? WHERE id=?",
+                          (str(it.get("type", "work"))[:20], str(it.get("source", ""))[:120],
+                           str(it.get("summary", ""))[:1000], str(it.get("tags", ""))[:200],
+                           str(it.get("status", "draft"))[:20], int(time.time()), row["id"]))
+            else:
+                c.execute("INSERT INTO canon_items(type, title, source, summary, tags, status, "
+                          "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                          (str(it.get("type", "work"))[:20], title,
+                           str(it.get("source", ""))[:120], str(it.get("summary", ""))[:1000],
+                           str(it.get("tags", ""))[:200], str(it.get("status", "draft"))[:20],
+                           int(time.time()), int(time.time())))
 
 
 def canon() -> list[dict]:
@@ -449,6 +521,17 @@ class Handler(ev.Handler):
                                str(data.get("tags", ""))[:200], "draft",
                                int(time.time()), int(time.time())))
                 audit("add_canon", title)
+                self._json({"ok": True, "canon": canon()})
+            elif p == "/api/workbench/canon/status":
+                cid = int(data.get("id", 0))
+                status = str(data.get("status", "draft"))
+                if status not in ("draft", "active", "approved", "retired"):
+                    self._json({"error": "bad status"}, 400)
+                    return
+                with conn() as c:
+                    c.execute("UPDATE canon_items SET status=?, updated_at=? WHERE id=?",
+                              (status, int(time.time()), cid))
+                audit("canon_status", str(cid), status)
                 self._json({"ok": True, "canon": canon()})
             elif p == "/api/workbench/changes":
                 title = str(data.get("title", "")).strip()
