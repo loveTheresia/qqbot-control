@@ -58,8 +58,8 @@ async function loadDashboard() {
       || `<div class="empty">还没有评测记录</div>`;
     $("#tab-dashboard").innerHTML = `
       <div class="guide">
-        <b>第一次用？</b> 按顺序来：<span>① 规则</span> → <span>② Canon</span> → <span>③ 评测</span> → <span>④ 变更</span> → <span>⑤ GitHub 发布</span>。
-        <br><b>一次只改一个方面</b>：一条规则、一个 Canon 主题、一个 PR；发布后观察 1~2 天，再动下一项。
+        <b>正确顺序：</b><span>① 看评测/问题</span> → <span>② 开变更单</span> → <span>③ 只改规则或 Canon</span> → <span>④ 回归评测</span> → <span>⑤ GitHub 合并</span> → <span>⑥ 观察/回滚</span>。
+        <br><b>一次只改一个方面</b>：不要同一轮既改规则又改 Canon；发布后观察 1~2 天，再动下一项。
       </div>
       <div class="grid">
         <div class="card kpi link-card" data-href="/eval"><b>${d.eval.labeled}</b><span>已评样本 · 去评测 →</span><small>待评 ${d.eval.pending}</small></div>
