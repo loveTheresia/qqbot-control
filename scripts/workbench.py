@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""管理人工作台 v0.1：规则 / Canon / 数据管线 / 变更 / 发布 + 评测入口。
+"""孤独的鱼：规则 / Canon / 数据管线 / 变更 / 发布 + 评测入口。
 
 启动：
   .venv/bin/python scripts/workbench.py --port 8099
@@ -423,6 +423,7 @@ def publish(note: str = "") -> dict:
                   "VALUES(?,?,?,?,0)", (ver, rules_json, note[:200], int(time.time())))
         c.execute("UPDATE policy_versions SET active=0")
         c.execute("UPDATE policy_versions SET active=1 WHERE version=?", (ver,))
+        c.execute("UPDATE policy_rules SET version=? WHERE status='active'", (ver,))
         POLICY.parent.mkdir(exist_ok=True)
         POLICY.write_text(json.dumps({"version": ver, "updated_at": int(time.time()),
                                       "note": note[:200],
@@ -487,6 +488,14 @@ class Handler(ev.Handler):
                     return
                 scope = str(data.get("scope", "group"))[:20]
                 pr = int(data.get("priority", 100))
+                cur_ver = int(release_info().get("policy_version", 0))
+                with conn() as c:
+                    draft = c.execute(
+                        "SELECT COUNT(*) FROM policy_rules WHERE status='active' AND version!=?",
+                        (cur_ver,)).fetchone()[0]
+                if draft >= 1:
+                    self._json({"error": "已有一条未发布规则。先发布并观察，再改下一条。"}, 409)
+                    return
                 rid = f"r{int(time.time()*1000)}"
                 with conn() as c:
                     c.execute("INSERT INTO policy_rules(rule_id, scope, priority, text, status, "
@@ -499,6 +508,14 @@ class Handler(ev.Handler):
                 status = str(data.get("status", "active"))
                 if status not in ("active", "disabled"):
                     self._json({"error": "bad status"}, 400)
+                    return
+                cur_ver = int(release_info().get("policy_version", 0))
+                with conn() as c:
+                    draft = c.execute(
+                        "SELECT COUNT(*) FROM policy_rules WHERE status='active' AND version!=? AND id!=?",
+                        (cur_ver, rid)).fetchone()[0]
+                if status == "active" and draft >= 1:
+                    self._json({"error": "已有一条未发布规则。先发布并观察，再启用下一条。"}, 409)
                     return
                 with conn() as c:
                     c.execute("UPDATE policy_rules SET status=?, updated_at=? WHERE id=?",
@@ -582,7 +599,7 @@ def main():
     global HTTPD
     HTTPD = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     ev.HTTPD = HTTPD
-    print(f"[workbench] http://127.0.0.1:{args.port}/", flush=True)
+    print(f"[孤独的鱼] http://127.0.0.1:{args.port}/", flush=True)
     HTTPD.serve_forever()
 
 
