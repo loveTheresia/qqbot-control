@@ -95,3 +95,12 @@ button.primary:disabled { opacity: .5; cursor: wait; }
   form.row { grid-template-columns: 1fr; }
   .top, .tabs, #app { padding-left: 14px; padding-right: 14px; }
 }
+.guide {
+  background: #fffaf0; border: 1px solid #ecdfc6; border-radius: 15px;
+  padding: 13px 16px; margin-bottom: 14px; font-size: 13px; line-height: 1.75; color: #5f5a4f;
+}
+.guide b { color: var(--ink); }
+.guide span { color: var(--accent); font-weight: 600; }
+.link-card { cursor: pointer; transition: transform .12s ease, border-color .12s ease; }
+.link-card:hover { transform: translateY(-2px); border-color: #c8dcd3; }
+.link-card span { color: var(--accent); }

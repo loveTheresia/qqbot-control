@@ -54,17 +54,21 @@ async function loadDashboard() {
       `<div class="chip">#${x.id} ${esc(x.label)}${x.note ? " · " + esc(x.note) : ""}</div>`).join("")
       || `<div class="empty">还没有评测记录</div>`;
     $("#tab-dashboard").innerHTML = `
+      <div class="guide">
+        <b>第一次用？</b> 按顺序来：<span>① 规则</span> → <span>② Canon</span> → <span>③ 评测</span> → <span>④ 变更</span> → <span>⑤ GitHub 发布</span>。
+        <br><b>一次只改一个方面</b>：一条规则、一个 Canon 主题、一个 PR；发布后观察 1~2 天，再动下一项。
+      </div>
       <div class="grid">
-        <div class="card kpi"><b>${d.eval.labeled}</b><span>已评样本</span><small>待评 ${d.eval.pending}</small></div>
-        <div class="card kpi"><b>${d.eval.like_rate}%</b><span>像人/还行</span><small>明显问题 ${d.eval.bad_rate}%</small></div>
-        <div class="card kpi"><b>${d.group.user_7d}</b><span>近 7 天群员消息</span><small>她 ${d.group.bot_7d} 句</small></div>
-        <div class="card kpi"><b>${d.rules}</b><span>启用补充规则</span><small>变更 ${d.changes} 条未发布</small></div>
+        <div class="card kpi link-card" data-href="/eval"><b>${d.eval.labeled}</b><span>已评样本 · 去评测 →</span><small>待评 ${d.eval.pending}</small></div>
+        <div class="card kpi link-card" data-href="/eval"><b>${d.eval.like_rate}%</b><span>像人/还行 · 看问题 →</span><small>明显问题 ${d.eval.bad_rate}%</small></div>
+        <div class="card kpi link-card" data-go="pipeline"><b>${d.group.user_7d}</b><span>近 7 天群员消息</span><small>她 ${d.group.bot_7d} 句 · 看管线</small></div>
+        <div class="card kpi link-card" data-go="rules"><b>${d.rules}</b><span>启用补充规则 · 去管理 →</span><small>变更 ${d.changes} 条未发布</small></div>
       </div>
       <div class="grid" style="margin-top:13px">
-        <div class="card kpi"><b>${d.canon}</b><span>Canon 条目</span><small>待审核</small></div>
-        <div class="card kpi"><b>${d.corpus}</b><span>语料条目</span><small>已核实才注入</small></div>
-        <div class="card kpi"><b>${r.policy_version ?? "—"}</b><span>当前 policy 版本</span><small>${esc(r.note || "")}</small></div>
-        <div class="card kpi"><b>${d.changes}</b><span>未发布变更</span><small>一次只推一个</small></div>
+        <div class="card kpi link-card" data-go="canon"><b>${d.canon}</b><span>Canon 条目 · 去录入 →</span><small>先录 3~5 条真正会聊到的</small></div>
+        <div class="card kpi link-card" data-go="pipeline"><b>${d.corpus}</b><span>语料条目</span><small>已核实才注入</small></div>
+        <div class="card kpi link-card" data-go="release"><b>${r.policy_version ?? "—"}</b><span>当前 policy 版本 · 看发布 →</span><small>${esc(r.note || "")}</small></div>
+        <div class="card kpi link-card" data-go="changes"><b>${d.changes}</b><span>未发布变更 · 去记录 →</span><small>一次只推一个</small></div>
       </div>
       <div class="grid two" style="margin-top:16px">
         <div class="card"><h3>评测标签</h3><div class="chips">${labels || `<span class="muted">暂无</span>`}</div></div>
@@ -74,6 +78,8 @@ async function loadDashboard() {
         <div class="panel-head"><h2>下一步</h2><a class="eval-link" href="/eval">去评测 →</a></div>
         <p class="hint">先采新一批节奏闸上线后的样本；规则改动先在“规则”页起草，发布前过一次评测。Canon 先录 3~5 条真正会聊到的。</p>
       </div>`;
+    $$("[data-go]").forEach(el => el.addEventListener("click", () => switchTab(el.dataset.go)));
+    $$("[data-href]").forEach(el => el.addEventListener("click", () => { window.location.href = el.dataset.href; }));
   } catch (e) { $("#tab-dashboard").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
 }
 
@@ -81,29 +87,39 @@ async function loadRules() {
   setLoading("#tab-rules");
   try {
     const d = await api("/api/workbench/rules");
+    const curVer = d.release?.policy_version ?? 0;
+    const draft = (d.rules || []).filter(r => r.status === "active" && (r.version || 0) !== curVer).length;
     const rows = (d.rules || []).map(r => `
       <tr>
-        <td><code>${esc(r.rule_id)}</code><div class="sub">${esc(r.scope)} · P${r.priority}</div></td>
+        <td><code>${esc(r.rule_id)}</code><div class="sub">${esc(r.scope)}</div></td>
         <td>${esc(r.text)}</td>
+        <td><b>${r.priority}</b><div class="sub">${r.priority <= 49 ? "高" : r.priority <= 99 ? "中高" : r.priority === 100 ? "默认" : "低"}</div></td>
         <td>${badge(r.status)}</td>
         <td><button class="mini" data-rule-toggle="${r.id}" data-status="${r.status === "active" ? "disabled" : "active"}">${r.status === "active" ? "停用" : "启用"}</button></td>
-      </tr>`).join("") || `<tr><td colspan="4" class="empty">还没有补充规则。规则只追加，不改人格核心。</td></tr>`;
+      </tr>`).join("") || `<tr><td colspan="5" class="empty">还没有补充规则。规则只追加，不改人格核心。</td></tr>`;
     $("#tab-rules").innerHTML = `
+      <div class="guide">
+        <b>优先级 100 是什么意思：</b>100 是默认中间值。数字越小越先执行（1~49 高，50~99 中高，100 默认，200+ 低）。
+        同一场景两条规则冲突时，先看数字小的。一般不用改，保持 100 就行。
+        <br><b>一次只加一条：</b>发布并观察 1~2 天，再加下一条。
+      </div>
       <div class="card">
         <div class="panel-head"><h2>补充规则</h2>
           <button class="primary" id="publish-policy">发布当前规则</button></div>
         <p class="hint">这些规则追加在人格/RULES 之后；冲突时以人格核心为准。发布后 bot 下一条消息就会读到新版本，不需要重启。</p>
-        <form class="row" id="rule-form" style="margin-top:12px">
-          <select name="scope"><option value="group">群聊</option><option value="private">私聊</option><option value="all">全部</option></select>
-          <input name="priority" type="number" value="100" min="1" max="999">
-          <input name="text" placeholder="例如：别人只回哈哈哈、没有新信息时，不接。" maxlength="500" required>
-          <button class="ghost" type="submit">添加规则</button>
+        ${draft >= 1 ? `<div class="guide" style="border-color:#e6c9a8;background:#fdf6ea">现在有 <b>${draft}</b> 条未发布规则。先发布观察，再改下一条；后端会阻止同时添加第二条未发布规则。</div>` : ""}
+        <form class="form-grid" id="rule-form" style="margin-top:12px">
+          <div><label>作用域</label><select name="scope"><option value="group">群聊</option><option value="private">私聊</option><option value="all">全部</option></select></div>
+          <div><label>优先级（数字越小越先）</label><input name="priority" type="number" value="100" min="1" max="999"><small class="muted">默认 100；不确定就别改</small></div>
+          <div class="wide"><label>规则内容</label><input name="text" placeholder="例如：别人只回哈哈哈、没有新信息时，不接。" maxlength="500" required></div>
+          <div class="wide actions"><button class="ghost" type="submit">添加规则</button><span class="hint">只加一条，写清楚适用场景。</span></div>
         </form>
-        <table class="table"><thead><tr><th>ID / 范围</th><th>规则</th><th>状态</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+        <table class="table"><thead><tr><th>ID / 范围</th><th>规则</th><th>优先级</th><th>状态</th><th></th></tr></thead><tbody>${rows}</tbody></table>
       </div>
-      <div class="card panel"><h3>当前发布</h3><p class="hint">policy v${d.release?.policy_version ?? "—"} · ${esc(d.release?.note || "无备注")}</p></div>`;
+      <div class="card panel"><h3>当前发布</h3><p class="hint">policy v${d.release?.policy_version ?? "—"} · ${esc(d.release?.note || "无备注")} · 未发布规则 ${draft}</p></div>`;
     $("#rule-form").addEventListener("submit", async (e) => {
       e.preventDefault(); const f = new FormData(e.target);
+      if (!confirm("只改这一条规则吗？\n\n发布后观察 1~2 天，再决定下一条。")) return;
       try {
         await api("/api/workbench/rules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: f.get("scope"), priority: Number(f.get("priority")), text: f.get("text") }) });
         toast("规则已添加"); state.loaded.rules = false; await loadRules(); await loadDashboard();
@@ -116,7 +132,8 @@ async function loadRules() {
       } catch (err) { toast("失败：" + err.message); }
     }));
     $("#publish-policy").addEventListener("click", async () => {
-      const note = prompt("发布备注（可选）：", "规则校准") || "";
+      if (!confirm("发布检查：\n1) 这次只改了一个方面？\n2) 写清楚了适用场景？\n3) 想好了怎么回滚？\n\n发布后 bot 下一条消息生效。")) return;
+      const note = prompt("发布备注（写一句这次改了什么）：", "规则校准") || "";
       try {
         const r = await api("/api/workbench/publish", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note }) });
         toast(`已发布 v${r.version}，${r.rules} 条规则`); state.loaded.rules = false; await loadRules(); await loadDashboard();
@@ -135,9 +152,13 @@ async function loadCanon() {
       <td><button class="mini" data-canon-status="${c.id}" data-status="${c.status === "active" || c.status === "approved" ? "draft" : "approved"}">${c.status === "active" || c.status === "approved" ? "撤回" : "审核通过"}</button></td></tr>`).join("")
       || `<tr><td colspan="4" class="empty">还没有 canon。先录 3~5 条她真的会聊到的作品/概念。</td></tr>`;
     $("#tab-canon").innerHTML = `
+      <div class="guide">
+        <b>第一次录 Canon：</b>先录 3~5 条她真的会聊到的，不要一次灌 100 条。
+        新增是 <b>draft</b>，点“审核通过”后才会进入 GitHub 发布和群聊注入；一次先做一个主题。
+      </div>
       <div class="card">
-        <div class="panel-head"><h2>Canon 录入</h2><span class="muted">v0.1 只存储，不注入</span></div>
-        <p class="hint">标准字段：类型、标题、来源、一句话摘要、标签。引文核实后再扩字段；现在先保证“有结构”。</p>
+        <div class="panel-head"><h2>Canon 录入</h2><span class="muted">draft → 审核通过 → GitHub 发布 → bot 拉取</span></div>
+        <p class="hint">标准字段：类型、标题、来源、一句话摘要、标签。引文核实后再扩字段；现在先保证“有结构”。状态为 draft 的条目不会注入。</p>
         <form id="canon-form" class="form-grid" style="margin-top:12px">
           <div><label>类型</label><select name="type"><option value="work">作品</option><option value="concept">概念</option><option value="person">人物</option><option value="event">事件</option></select></div>
           <div><label>标题</label><input name="title" required maxlength="120" placeholder="《局外人》"></div>
@@ -248,6 +269,10 @@ async function loadGithub() {
         <div class="card kpi"><b>${configured ? "已连接" : "未配置"}</b><span>${esc(d.repo || "GH_REPO 未设置")}</span><small>分支 ${esc(d.branch || "main")}</small></div>
         <div class="card kpi"><b>${esc(d.head ? d.head.slice(0, 7) : "—")}</b><span>当前 commit</span><small>${esc(d.message || "")}</small></div>
       </div>
+      <div class="guide">
+        <b>发布前检查：</b>这次只改一个方面？PR 里只包含一个主题？写清楚了验收指标和回滚方式？
+        <br><b>流程：</b>提交 → PR → validate 绿 → 合并并发布 → bot 约 2 分钟内自动拉取。
+      </div>
       <div class="card panel">
         <div class="panel-head"><h2>控制面发布</h2><span class="muted">${prLine}</span></div>
         <p class="hint">流程：提交当前 control 到分支 → 创建 PR → GitHub Actions 运行 validate → 检查通过后，点“合并并发布”。合并后以 GitHub 上的 policy 为准写回本地，bot 下一条消息生效。</p>
@@ -270,6 +295,7 @@ async function loadGithub() {
       } catch (e) { toast("失败：" + e.message); }
     });
     $("#gh-pr")?.addEventListener("click", async () => {
+      if (!confirm("这次 PR 只包含一个方面吗？\n\n一次只改一个变量，才能判断是哪个改动起作用。")) return;
       try {
         await api("/api/workbench/github/pr", { method: "POST" });
         toast("PR 已创建，等待 validate"); state.loaded.github = false; await loadGithub();
