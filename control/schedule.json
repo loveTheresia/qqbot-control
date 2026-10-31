@@ -1,0 +1,13 @@
+{
+  "workdays": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "start_hour": 8,
+  "end_hour": 18,
+  "weekend_online": true,
+  "updated_at": 1793460842
+}
