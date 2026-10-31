@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib.util
 import json
 import re
 import sqlite3
@@ -23,6 +24,10 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import eval_ui as ev  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location("qqbot_workbench", ROOT / "bot" / "bot.py")
+BOT = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(BOT)
 
 DB = ROOT / "data" / "bot.db"
 POLICY = ROOT / "control" / "policy.json"
@@ -298,6 +303,60 @@ def github_merge() -> dict:
     return {"ok": True, "tag": tag, "sha": sha, "policy_version": remote.get("version", 0)}
 
 
+def builtin_rules() -> dict:
+    return {"rules": BOT.RULES, "group": BOT.GROUP_RULES}
+
+
+def params_info() -> dict:
+    BOT.reload_params()
+    groups = {
+        "回复节奏": [
+            ("REPLY_DELAY_MIN", "收到消息后的基础反应延迟下限（秒）"),
+            ("REPLY_DELAY_MAX", "收到消息后的基础反应延迟上限（秒）"),
+            ("READ_PER_CHAR", "每字阅读时间（秒）"),
+            ("READ_MAX", "阅读时间上限（秒）"),
+            ("DELAY_MIN", "每句之间停顿下限（秒）"),
+            ("DELAY_MAX", "每句之间停顿上限（秒）"),
+            ("TYPE_PER_CHAR_MIN", "每字打字时间下限（秒）"),
+            ("TYPE_PER_CHAR_MAX", "每字打字时间上限（秒）"),
+            ("TYPE_DELAY_MAX", "单句打字时间上限（秒）"),
+            ("BATCH_PAUSE_MIN", "连发一批后的停顿下限（秒）"),
+            ("BATCH_PAUSE_MAX", "连发一批后的停顿上限（秒）"),
+            ("JITTER_MIN", "随机抖动下限（秒）"),
+            ("JITTER_MAX", "随机抖动上限（秒）"),
+        ],
+        "群聊频率": [
+            ("FOLLOWUP_WINDOW", "她发言后多久内继续判断接话（秒）"),
+            ("GROUP_REPLY_COOLDOWN", "她说完后至少隔多久才接非直接消息（秒）"),
+            ("GROUP_MIN_OTHERS_MSGS", "她说完后至少几条别人的消息才接"),
+            ("GROUP_MAX_REPLIES_10MIN", "10 分钟内最多几条非直接回复"),
+            ("AMBIENT_MODE", "主动插话模式：off / conservative"),
+            ("LULL_SEC", "群聊空档多少秒才考虑主动插话"),
+            ("AMBIENT_THRESHOLD", "主动插话置信度阈值"),
+            ("AMBIENT_MAX_10MIN", "10 分钟最多主动插话次数"),
+            ("AMBIENT_COOLDOWN", "两次主动插话最短间隔（秒）"),
+        ],
+        "热情/随机": [
+            ("REPLY_PROB", "私聊随机回复概率（0~1）"),
+            ("AMBIENT_PROB", "旧 social 模式的随机插话概率；conservative 下不用"),
+            ("MUTE_PROB", "随机装没看见的概率"),
+        ],
+    }
+    data = {}
+    for group, keys in groups.items():
+        rows = []
+        for key, desc in keys:
+            try:
+                val = BOT.pget(key) if key in BOT.PARAM_TYPES else getattr(BOT, key)
+            except Exception:
+                val = None
+            rows.append({"key": key, "desc": desc, "value": val})
+        data[group] = rows
+    return {"groups": data,
+            "hot": sorted(BOT.PARAM_TYPES.keys()),
+            "note": "带 /参数 的键可热调；其余改 config/.env 后需重启。没有单一“热情值”，热情=回复概率+主动插话+提问补全共同作用。"}
+
+
 def audit(action: str, target: str, detail: str = "") -> None:
     with conn() as c:
         c.execute("INSERT INTO audit_log(actor, action, target, detail, created_at) "
@@ -461,6 +520,10 @@ class Handler(ev.Handler):
             self._json({"changes": changes()})
         elif p == "/api/workbench/pipeline":
             self._json(pipeline())
+        elif p == "/api/workbench/builtin":
+            self._json(builtin_rules())
+        elif p == "/api/workbench/params":
+            self._json(params_info())
         elif p == "/api/workbench/github":
             self._json(github_status())
         elif p == "/api/workbench/release":
