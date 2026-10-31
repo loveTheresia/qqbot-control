@@ -72,9 +72,32 @@ def scan_secrets() -> None:
                 fail(f"疑似密钥：{p.relative_to(ROOT)}")
 
 
+def check_canon() -> None:
+    p = ROOT / "control" / "canon.json"
+    if not p.exists():
+        return
+    data = json.loads(p.read_text(encoding="utf-8"))
+    items = data.get("items", [])
+    if not isinstance(items, list):
+        fail("canon.items 必须是数组")
+    seen = set()
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            fail(f"canon.items[{i}] 不是对象")
+        title = str(it.get("title", "")).strip()
+        if not title:
+            fail(f"canon.items[{i}] 缺少 title")
+        if title in seen:
+            fail(f"canon 重复标题：{title}")
+        seen.add(title)
+        if it.get("status", "draft") not in ("draft", "active", "approved", "retired"):
+            fail(f"canon {title} status 非法")
+
+
 def main() -> int:
     check_policy()
     check_release()
+    check_canon()
     scan_secrets()
     print("[ok] control files valid")
     return 0
