@@ -537,6 +537,8 @@ class Handler(ev.Handler):
             self._file(UI / "style.css", "text/css; charset=utf-8")
         elif p == "/workbench.js":
             self._file(UI / "app.js", "application/javascript; charset=utf-8")
+        elif p == "/avatar.jpg":
+            self._file(UI / "avatar.jpg", "image/jpeg")
         elif p == "/eval":
             self._file(ev.UI / "index.html", "text/html; charset=utf-8")
         elif p == "/api/workbench/dashboard":
