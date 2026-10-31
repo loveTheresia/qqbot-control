@@ -1,7 +1,7 @@
 {
-  "control_version": 2,
-  "policy_version": 1,
-  "canon_version": 1793458492,
-  "updated_at": 1793458618,
-  "note": "control-v2 canon sync"
+  "control_version": 3,
+  "policy_version": 2,
+  "canon_version": 1793460304,
+  "updated_at": 1793460304,
+  "note": "基于 39 条历史评测（12 不懂装懂 / 3 不该回）：增加指代与上下文规则"
 }
