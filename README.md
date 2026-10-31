@@ -22,7 +22,7 @@ policy / canon / PR  →  workbench  →  control 快照  →  bot
 bot/              bot 源码
 scripts/          运行、评测、工作台脚本
 eval_ui/          人工评测页面
-workbench_ui/     管理人工作台
+workbench_ui/     孤独的鱼控制台
 control/          policy.json / release.json
 canon/            结构化知识条目
 eval/scenarios/   固定回归场景
@@ -42,7 +42,7 @@ python -m venv .venv
 
 浏览器打开 `http://127.0.0.1:8099/`。评测页在 `/eval`。
 
-工作台里的 **GitHub** 页可以：
+孤独的鱼的 **GitHub** 页可以：
 
 - 提交 `control/` 到新分支；
 - 创建 PR；
