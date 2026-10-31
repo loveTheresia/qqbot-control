@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import os
 import importlib.util
 import json
 import re
 import sqlite3
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -528,6 +530,19 @@ def publish(note: str = "") -> dict:
     return {"version": ver, "rules": len(active)}
 
 
+def watch_parent(pid: int) -> None:
+    """父进程（DSH web / 启动器）退出后自动停掉工作台。"""
+    while True:
+        try:
+            os.kill(pid, 0)
+        except Exception:
+            print("[孤独的鱼] 父进程已退出，工作台退出", flush=True)
+            if HTTPD:
+                HTTPD.shutdown()
+            return
+        time.sleep(2)
+
+
 class Handler(ev.Handler):
     def do_GET(self):
         p = urlparse(self.path).path
@@ -699,13 +714,17 @@ class Handler(ev.Handler):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8099)
+    ap.add_argument("--follow-dsh", action="store_true", default=False)
+    ap.add_argument("--parent-pid", type=int, default=0)
     args = ap.parse_args()
     init_db()
     from http.server import ThreadingHTTPServer
     global HTTPD
     HTTPD = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     ev.HTTPD = HTTPD
-    print(f"[孤独的鱼] http://127.0.0.1:{args.port}/", flush=True)
+    if args.parent_pid:
+        threading.Thread(target=watch_parent, args=(args.parent_pid,), daemon=True).start()
+    print(f"[孤独的鱼] http://127.0.0.1:{args.port}/ (parent={args.parent_pid})", flush=True)
     HTTPD.serve_forever()
 
 
