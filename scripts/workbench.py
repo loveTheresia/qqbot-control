@@ -9,10 +9,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sqlite3
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -73,6 +76,169 @@ def init_db() -> None:
                          int(time.time()), int(time.time())))
             except Exception:
                 pass
+
+
+def load_env() -> dict:
+    cfg = {}
+    p = ROOT / "config" / ".env"
+    if p.exists():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+    return cfg
+
+
+def get_state(k: str) -> str:
+    with conn() as c:
+        row = c.execute("SELECT v FROM settings WHERE k=?", (k,)).fetchone()
+    return row["v"] if row else ""
+
+
+def set_state(k: str, v: str) -> None:
+    with conn() as c:
+        c.execute("INSERT INTO settings(k, v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                  (k, v))
+
+
+def gh_request(method: str, path: str, data: dict | None = None) -> dict:
+    cfg = load_env()
+    repo = cfg.get("GH_REPO", "")
+    token = cfg.get("GH_TOKEN", "")
+    if not repo or not token:
+        raise RuntimeError("GH_REPO / GH_TOKEN 未配置")
+    url = f"https://api.github.com/repos/{repo}{path}"
+    body = json.dumps(data).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body, method=method, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "qqbot-workbench",
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read().decode()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode(errors="ignore")
+        try:
+            msg = json.loads(raw).get("message", raw)
+        except Exception:
+            msg = raw
+        raise RuntimeError(f"GitHub {e.code}: {msg[:300]}")
+
+
+def github_status() -> dict:
+    cfg = load_env()
+    out = {"configured": bool(cfg.get("GH_REPO") and cfg.get("GH_TOKEN")),
+           "repo": cfg.get("GH_REPO", ""), "branch": cfg.get("GH_BRANCH", "main"),
+           "pr": None, "checks": [], "head": "", "message": ""}
+    if not out["configured"]:
+        out["message"] = "请在 config/.env 配置 GH_REPO / GH_TOKEN"
+        return out
+    try:
+        ref = gh_request("GET", f"/git/ref/heads/{out['branch']}")
+        out["head"] = ref.get("object", {}).get("sha", "")
+        pr_raw = get_state("gh_pr")
+        pr = json.loads(pr_raw) if pr_raw else None
+        if pr:
+            try:
+                live = gh_request("GET", f"/pulls/{pr['number']}")
+                pr.update({"state": live.get("state"), "mergeable": live.get("mergeable"),
+                           "url": live.get("html_url", pr.get("url", "")),
+                           "head": live.get("head", {}).get("sha", pr.get("head", ""))})
+                out["pr"] = pr
+            except Exception:
+                out["pr"] = pr
+        check_sha = pr.get("head") if pr else out["head"]
+        checks = gh_request("GET", f"/commits/{check_sha}/check-runs")
+        out["checks"] = [{"name": c.get("name"), "status": c.get("status"),
+                          "conclusion": c.get("conclusion"),
+                          "url": c.get("details_url")} for c in checks.get("check_runs", [])]
+    except Exception as e:
+        out["message"] = str(e)
+    return out
+
+
+def github_create_pr() -> dict:
+    cfg = load_env()
+    repo = cfg.get("GH_REPO", "")
+    branch = cfg.get("GH_BRANCH", "main")
+    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    ver = int(policy.get("version", 0))
+    existing = get_state("gh_pr")
+    if existing:
+        pr = json.loads(existing)
+        if pr.get("state", "open") == "open":
+            return {"ok": True, "pr": pr, "reused": True}
+    head = gh_request("GET", f"/git/ref/heads/{branch}")["object"]["sha"]
+    base_commit = gh_request("GET", f"/git/commits/{head}")
+    tree_sha = base_commit["tree"]["sha"]
+    files = {
+        "control/policy.json": policy,
+        "control/release.json": {"policy_version": ver, "canon_version": 0,
+                                 "updated_at": int(time.time()),
+                                 "note": policy.get("note", "")},
+    }
+    blobs = []
+    for path, obj in files.items():
+        content = json.dumps(obj, ensure_ascii=False, indent=2) + "\n"
+        blob = gh_request("POST", "/git/blobs",
+                          {"content": base64.b64encode(content.encode()).decode(),
+                           "encoding": "base64"})
+        blobs.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
+    tree = gh_request("POST", "/git/trees", {"base_tree": tree_sha, "tree": blobs})
+    author = {"name": cfg.get("GH_AUTHOR_NAME", "workbench"),
+              "email": cfg.get("GH_AUTHOR_EMAIL", "workbench@users.noreply.github.com")}
+    commit = gh_request("POST", "/git/commits", {
+        "message": f"control: v{ver}", "tree": tree["sha"],
+        "parents": [head], "author": author, "committer": author})
+    new_branch = f"control/v{ver}-{int(time.time())}"
+    gh_request("POST", "/git/refs",
+               {"ref": f"refs/heads/{new_branch}", "sha": commit["sha"]})
+    body = (f"自动提交 control v{ver}。\n\n"
+            f"- 规则数：{len(policy.get('rules', []))}\n"
+            f"- 备注：{policy.get('note', '')}\n")
+    pr = gh_request("POST", "/pulls", {
+        "title": f"control: v{ver}", "head": new_branch, "base": branch, "body": body})
+    pr_state = {"number": pr["number"], "url": pr["html_url"], "branch": new_branch,
+                "head": commit["sha"], "version": ver, "state": "open"}
+    set_state("gh_pr", json.dumps(pr_state, ensure_ascii=False))
+    audit("github_pr", str(pr["number"]), new_branch)
+    return {"ok": True, "pr": pr_state}
+
+
+def github_merge() -> dict:
+    raw = get_state("gh_pr")
+    if not raw:
+        raise RuntimeError("当前没有待合并的 PR")
+    pr = json.loads(raw)
+    res = gh_request("PUT", f"/pulls/{pr['number']}/merge",
+                     {"merge_method": "squash"})
+    sha = res.get("sha", "")
+    tag = f"control-v{pr.get('version', 0)}"
+    try:
+        gh_request("POST", "/git/refs", {"ref": f"refs/tags/{tag}", "sha": sha})
+    except Exception as e:
+        # tag 已存在不阻塞合并
+        print(f"[github] tag {tag}: {e}")
+    # 以 GitHub 合并后的 policy 为准，写回本地
+    cfg = load_env()
+    repo = cfg.get("GH_REPO", "")
+    content = gh_request("GET", f"/contents/control/policy.json?ref={sha}")
+    remote = json.loads(base64.b64decode(content["content"]).decode())
+    POLICY.write_text(json.dumps(remote, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    rel = release_info()
+    rel.update({"policy_version": remote.get("version", pr.get("version", 0)),
+                "updated_at": int(time.time()), "note": f"github {tag}"})
+    RELEASE.write_text(json.dumps(rel, ensure_ascii=False, indent=2), encoding="utf-8")
+    set_state("gh_pr", "")
+    set_state("gh_last_release", json.dumps({"tag": tag, "sha": sha,
+                                             "version": remote.get("version", 0)}))
+    audit("github_merge", tag, sha)
+    return {"ok": True, "tag": tag, "sha": sha, "policy_version": remote.get("version", 0)}
 
 
 def audit(action: str, target: str, detail: str = "") -> None:
@@ -206,6 +372,8 @@ class Handler(ev.Handler):
             self._json({"changes": changes()})
         elif p == "/api/workbench/pipeline":
             self._json(pipeline())
+        elif p == "/api/workbench/github":
+            self._json(github_status())
         elif p == "/api/workbench/release":
             with conn() as c:
                 vs = c.execute("SELECT version, note, created_at, active FROM policy_versions "
@@ -283,6 +451,10 @@ class Handler(ev.Handler):
                                int(time.time()), int(time.time())))
                 audit("add_change", title)
                 self._json({"ok": True, "changes": changes()})
+            elif p == "/api/workbench/github/pr":
+                self._json(github_create_pr())
+            elif p == "/api/workbench/github/merge":
+                self._json(github_merge())
             elif p == "/api/workbench/changes/status":
                 cid = int(data.get("id", 0))
                 status = str(data.get("status", "draft"))
