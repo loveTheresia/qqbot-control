@@ -40,6 +40,8 @@ async function switchTab(name) {
     if (name === "release") await loadRelease();
     if (name === "github") await loadGithub();
     if (name === "params") await loadParams();
+    if (name === "schedule") await loadSchedule();
+    if (name === "persona") await loadPersona();
   }
 }
 
@@ -264,6 +266,82 @@ async function loadChanges() {
 }
 
 
+
+
+
+async function loadPersona() {
+  setLoading("#tab-persona");
+  try {
+    const d = await api("/api/workbench/persona");
+    const st = d.stats || {};
+    const labels = (st.labels || []).map(x => `<span class="chip">${esc(x.key)} ${x.count}</span>`).join("");
+    const block = (title, note, text) => `
+      <details class="card panel" ${title === "人格核心" ? "open" : ""}>
+        <summary><b>${esc(title)}</b> <span class="muted">${esc(note)}</span></summary>
+        <pre>${esc(text || "（暂无）")}</pre>
+      </details>`;
+    $("#tab-persona").innerHTML = `
+      <div class="guide">
+        <b>只读展示，不在这里修改。</b> 人格核心以 <code>config/system_prompt.txt</code> 为准；
+        反馈补丁已生效；蒸馏草稿尚未上线。训练结果看标签分布，不要只看单条回复。
+      </div>
+      <div class="grid">
+        <div class="card kpi"><b>${st.canon ?? 0}</b><span>Canon 条目</span></div>
+        <div class="card kpi"><b>${st.style ?? 0}</b><span>活跃风格词/梗</span></div>
+        <div class="card kpi"><b>${st.corpus ?? 0}</b><span>语料条目</span></div>
+        <div class="card kpi"><b>${labels || "—"}</b><span>人工标签</span></div>
+      </div>
+      ${block("人格核心", "已生效 · 只读", d.core)}
+      ${block("评测反馈补丁", "已生效 · 来自 39 条人工标签", d.feedback)}
+      ${block("人格蒸馏草稿", "未生效 · 需审阅", d.card_draft)}
+      ${block("人格方案", "设计说明", d.plan)}`;
+  } catch (e) { $("#tab-persona").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+}
+
+async function loadSchedule() {
+  setLoading("#tab-schedule");
+  try {
+    const d = await api("/api/workbench/schedule");
+    const s = d.schedule || {};
+    const days = ["周一","周二","周三","周四","周五","周六","周日"];
+    const boxes = days.map((n, i) => `<label class="daybox"><input type="checkbox" name="day" value="${i+1}" ${(s.workdays || []).includes(i+1) ? "checked" : ""}> ${n}</label>`).join("");
+    $("#tab-schedule").innerHTML = `
+      <div class="guide">
+        <b>这是最底层的作息规则：</b>工作时间内只理 @ 她，回复极简；非工作时间才正常群聊。
+        <br>保存后 bot 下一条消息就按新作息判断，不用重启。修改会影响所有群和私聊。
+      </div>
+      <div class="grid two">
+        <div class="card kpi"><b>${d.active ? "在线" : "上班中"}</b><span>当前状态</span><small>${esc(d.now)}</small></div>
+        <div class="card kpi"><b>${s.start_hour ?? 8}:00 – ${s.end_hour ?? 18}:00</b><span>工作日上班时段</span><small>${esc((s.workdays || []).map(x => days[x-1]).join("、"))}</small></div>
+      </div>
+      <div class="card panel">
+        <div class="panel-head"><h2>调整作息</h2><span class="muted">写入 control/schedule.json</span></div>
+        <form id="schedule-form">
+          <div class="form-grid">
+            <div><label>上班时间（小时）</label><input type="number" name="start_hour" min="0" max="23" value="${s.start_hour ?? 8}"></div>
+            <div><label>下班时间（小时）</label><input type="number" name="end_hour" min="1" max="24" value="${s.end_hour ?? 18}"></div>
+            <div class="wide"><label>工作日</label><div class="dayrow">${boxes}</div></div>
+            <div class="wide"><label class="daybox"><input type="checkbox" name="weekend_online" ${s.weekend_online !== false ? "checked" : ""}> 非工作日也保持在线</label></div>
+            <div class="wide actions"><button class="primary" type="submit">保存作息</button><span class="hint">只改这一页，不要同时改群聊频率。</span></div>
+          </div>
+        </form>
+      </div>
+      <div class="card panel"><h3>工作时间规则（只读）</h3><pre>${esc(d.busy_rules)}</pre></div>
+      <div class="card panel"><h3>群聊规则（只读）</h3><pre>${esc(d.group_rules)}</pre></div>`;
+    $("#schedule-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const workdays = f.getAll("day").map(Number);
+      const body = { workdays, start_hour: Number(f.get("start_hour")), end_hour: Number(f.get("end_hour")), weekend_online: f.get("weekend_online") === "on" };
+      if (!workdays.length) { toast("至少选一个工作日"); return; }
+      if (!confirm("确认修改作息？\n\n工作时间内她只理 @，回复会变短；非工作时间才正常聊天。")) return;
+      try {
+        await api("/api/workbench/schedule", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        toast("作息已保存，下一条消息生效"); state.loaded.schedule = false; await loadSchedule();
+      } catch (err) { toast("失败：" + err.message); }
+    });
+  } catch (e) { $("#tab-schedule").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+}
 
 async function loadParams() {
   setLoading("#tab-params");

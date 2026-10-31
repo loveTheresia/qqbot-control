@@ -70,6 +70,7 @@ CONTROL_SYNC = int(ENV.get("CONTROL_SYNC", "1"))
 CONTROL_SYNC_SEC = int(ENV.get("CONTROL_SYNC_SEC", "120"))
 GH_REPO = ENV.get("GH_REPO", "")
 CANON_FILE = CONTROL_DIR / "canon.json"
+SCHEDULE_FILE = CONTROL_DIR / "schedule.json"
 API_KEY = ENV.get("DEEPSEEK_API_KEY", "")
 BASE_URL = ENV.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
 MODEL = ENV.get("DEEPSEEK_MODEL", "deepseek-chat")
@@ -252,12 +253,56 @@ def now() -> datetime:
     return datetime.now(TZ)
 
 
+_SCHEDULE_CACHE = {"mtime": 0.0, "data": {}}
+
+
+def schedule() -> dict:
+    """工作/非工作时间，工作台作息页写 control/schedule.json 后即时生效。"""
+    default = {"workdays": [1, 2, 3, 4, 5], "start_hour": BUSY_FROM_HOUR,
+               "end_hour": BUSY_AFTER_HOUR, "weekend_online": True}
+    try:
+        st = SCHEDULE_FILE.stat()
+        if st.st_mtime != _SCHEDULE_CACHE["mtime"]:
+            d = json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
+            _SCHEDULE_CACHE["data"] = d if isinstance(d, dict) else default
+            _SCHEDULE_CACHE["mtime"] = st.st_mtime
+        d = _SCHEDULE_CACHE["data"] or default
+        return {**default, **d}
+    except Exception:
+        return default
+
+
+def write_schedule(data: dict) -> None:
+    clean = {
+        "workdays": sorted({int(x) for x in data.get("workdays", []) if 1 <= int(x) <= 7}),
+        "start_hour": max(0, min(23, int(data.get("start_hour", 8)))),
+        "end_hour": max(1, min(24, int(data.get("end_hour", 18)))),
+        "weekend_online": bool(data.get("weekend_online", True)),
+        "updated_at": int(time.time()),
+    }
+    if not clean["workdays"]:
+        clean["workdays"] = [1, 2, 3, 4, 5]
+    if clean["start_hour"] >= clean["end_hour"]:
+        raise ValueError("上班时间必须早于下班时间")
+    SCHEDULE_FILE.write_text(json.dumps(clean, ensure_ascii=False, indent=2) + "\n",
+                             encoding="utf-8")
+
+
+def busy_rules_text() -> str:
+    sch = schedule()
+    return (BUSY_RULES.replace("工作日 8:00-18:00",
+                               f"工作日 {sch['start_hour']}:00-{sch['end_hour']}:00")
+            .replace("六点后", f"{sch['end_hour']}:00 后"))
+
+
 def is_active_time(dt: datetime | None = None) -> bool:
     """工作日 8:00-18:00 是工作时间（只理 @ 她的消息）；周末全天在线，工作日 18:00 后在线"""
     dt = dt or now()
-    if dt.weekday() >= 5:                       # 周六周日
-        return True
-    return not (BUSY_FROM_HOUR <= dt.hour < BUSY_AFTER_HOUR)
+    sch = schedule()
+    iso_day = dt.isoweekday()
+    if iso_day not in sch.get("workdays", [1, 2, 3, 4, 5]):
+        return bool(sch.get("weekend_online", True))
+    return not (int(sch.get("start_hour", 8)) <= dt.hour < int(sch.get("end_hour", 18)))
 
 
 def period_of(dt: datetime | None = None) -> str:
@@ -285,7 +330,9 @@ def time_hint() -> str:
     wd = "一二三四五六日"[dt.weekday()]
     tomorrow = dt + timedelta(days=1)
     twd = "一二三四五六日"[tomorrow.weekday()]
-    status = "你在线" if is_active_time(dt) else f"你在上班（工作时间 {BUSY_FROM_HOUR}:00-{BUSY_AFTER_HOUR}:00）"
+    sch = schedule()
+    status = "你在线" if is_active_time(dt) else (
+        f"你在上班（工作时间 {sch.get('start_hour')}:00-{sch.get('end_hour')}:00）")
     return (
         "\n【时间锚点（系统时钟，必须以此为准，不许猜）】\n"
         f"现在是 {dt:%Y-%m-%d} 星期{wd} {dt:%H:%M}（北京时间），时段：{period_of(dt)}；{status}。\n"
@@ -1733,7 +1780,7 @@ def build_messages(conv: str, text: str, gid: int | None = None, master: bool = 
         system += "\n" + MASTER_RULES
     _busy = not force_active and not is_active_time()
     if _busy:
-        system += "\n" + BUSY_RULES
+        system += "\n" + busy_rules_text()
     elif gid:
         system += "\n" + GROUP_RULES
     if is_question(text):
@@ -2292,6 +2339,10 @@ PARAM_TYPES = {
     "TYPE_PER_CHAR_MIN": float, "TYPE_PER_CHAR_MAX": float, "TYPE_DELAY_MAX": float,
     "BATCH_SIZE": int, "BATCH_PAUSE_MIN": float, "BATCH_PAUSE_MAX": float,
     "FOLLOWUP_WINDOW": int, "AMBIENT_PROB": float, "AMBIENT_COOLDOWN": int,
+    "GROUP_REPLY_COOLDOWN": int, "GROUP_MIN_OTHERS_MSGS": int,
+    "GROUP_MAX_REPLIES_10MIN": int, "LULL_SEC": int,
+    "AMBIENT_THRESHOLD": float, "AMBIENT_MAX_10MIN": int,
+    "AMBIENT_MODE": str,
     "MEMORY_EVERY": int,
     "BUSY_FROM_HOUR": int, "BUSY_AFTER_HOUR": int,
     "REPLY_PROB": float, "REPLY_DELAY_MIN": float, "REPLY_DELAY_MAX": float,
@@ -2309,6 +2360,16 @@ def pget(k: str):
 
 def pset(k: str, v) -> None:
     globals()[PARAM_GLOBALS.get(k, k)] = v
+    if k in ("BUSY_FROM_HOUR", "BUSY_AFTER_HOUR"):
+        try:
+            sch = schedule()
+            if k == "BUSY_FROM_HOUR":
+                sch["start_hour"] = int(v)
+            else:
+                sch["end_hour"] = int(v)
+            write_schedule(sch)
+        except Exception:
+            pass
 
 
 def reload_params() -> None:

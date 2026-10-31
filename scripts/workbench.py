@@ -357,6 +357,35 @@ def params_info() -> dict:
             "note": "带 /参数 的键可热调；其余改 config/.env 后需重启。没有单一“热情值”，热情=回复概率+主动插话+提问补全共同作用。"}
 
 
+def schedule_info() -> dict:
+    sch = BOT.schedule()
+    return {"schedule": sch, "active": BOT.is_active_time(),
+            "now": BOT.now().strftime("%Y-%m-%d %H:%M"),
+            "busy_rules": BOT.busy_rules_text(),
+            "group_rules": BOT.GROUP_RULES}
+
+
+def persona_info() -> dict:
+    def read(path: Path, limit: int = 12000) -> str:
+        try:
+            return path.read_text(encoding="utf-8")[:limit]
+        except Exception:
+            return ""
+    with conn() as c:
+        labels = c.execute("SELECT label, COUNT(*) n FROM eval_cases WHERE status='labeled' GROUP BY label").fetchall()
+        canon_n = c.execute("SELECT COUNT(*) FROM canon_items").fetchone()[0]
+        style_n = c.execute("SELECT COUNT(*) FROM style_items WHERE status='active'").fetchone()[0]
+        corpus_n = c.execute("SELECT COUNT(*) FROM corpus").fetchone()[0]
+    return {
+        "core": read(ROOT / "config" / "system_prompt.txt"),
+        "card_draft": read(ROOT / "persona" / "card.draft.md"),
+        "feedback": read(ROOT / "persona" / "feedback-patch.md"),
+        "plan": read(ROOT / "persona" / "PLAN.md"),
+        "stats": {"labels": [{"key": r["label"], "count": r["n"]} for r in labels],
+                  "canon": canon_n, "style": style_n, "corpus": corpus_n},
+    }
+
+
 def audit(action: str, target: str, detail: str = "") -> None:
     with conn() as c:
         c.execute("INSERT INTO audit_log(actor, action, target, detail, created_at) "
@@ -522,6 +551,10 @@ class Handler(ev.Handler):
             self._json(pipeline())
         elif p == "/api/workbench/builtin":
             self._json(builtin_rules())
+        elif p == "/api/workbench/persona":
+            self._json(persona_info())
+        elif p == "/api/workbench/schedule":
+            self._json(schedule_info())
         elif p == "/api/workbench/params":
             self._json(params_info())
         elif p == "/api/workbench/github":
@@ -602,6 +635,14 @@ class Handler(ev.Handler):
                                int(time.time()), int(time.time())))
                 audit("add_canon", title)
                 self._json({"ok": True, "canon": canon()})
+            elif p == "/api/workbench/schedule":
+                try:
+                    BOT.write_schedule(data)
+                except Exception as e:
+                    self._json({"error": str(e)}, 400)
+                    return
+                audit("schedule", "update", json.dumps(data, ensure_ascii=False)[:200])
+                self._json({"ok": True, **schedule_info()})
             elif p == "/api/workbench/canon/status":
                 cid = int(data.get("id", 0))
                 status = str(data.get("status", "draft"))
