@@ -210,6 +210,22 @@ def github_create_pr() -> dict:
     return {"ok": True, "pr": pr_state}
 
 
+def github_pull() -> dict:
+    cfg = load_env()
+    branch = cfg.get("GH_BRANCH", "main")
+    content = gh_request("GET", f"/contents/control/policy.json?ref={branch}")
+    remote = json.loads(base64.b64decode(content["content"]).decode())
+    if not isinstance(remote.get("version"), int) or not isinstance(remote.get("rules"), list):
+        raise RuntimeError("远端 policy 结构不合法，拒绝覆盖")
+    POLICY.write_text(json.dumps(remote, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    rel = release_info()
+    rel.update({"policy_version": remote["version"], "updated_at": int(time.time()),
+                "note": f"github pull {branch}"})
+    RELEASE.write_text(json.dumps(rel, ensure_ascii=False, indent=2), encoding="utf-8")
+    audit("github_pull", branch, f"v{remote['version']}")
+    return {"ok": True, "policy_version": remote["version"], "rules": len(remote["rules"])}
+
+
 def github_merge() -> dict:
     raw = get_state("gh_pr")
     if not raw:
@@ -453,6 +469,8 @@ class Handler(ev.Handler):
                 self._json({"ok": True, "changes": changes()})
             elif p == "/api/workbench/github/pr":
                 self._json(github_create_pr())
+            elif p == "/api/workbench/github/pull":
+                self._json(github_pull())
             elif p == "/api/workbench/github/merge":
                 self._json(github_merge())
             elif p == "/api/workbench/changes/status":
