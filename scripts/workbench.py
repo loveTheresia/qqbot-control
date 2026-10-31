@@ -15,6 +15,7 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -528,6 +529,36 @@ def publish(note: str = "") -> dict:
     return {"version": ver, "rules": len(active)}
 
 
+def dsh_alive(port: int = 3080) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except Exception:
+        pass
+    # 端口偶尔抖动时，用进程再确认一次
+    try:
+        r = subprocess.run(["pgrep", "-f", "[d]sh web"], capture_output=True)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def watch_dsh(port: int = 3080, grace: int = 10) -> None:
+    """DSH web 消失后自动停掉工作台，避免孤儿服务。"""
+    miss = 0
+    while True:
+        if dsh_alive(port):
+            miss = 0
+        else:
+            miss += 1
+            if miss >= grace:
+                print("[孤独的鱼] DSH web 已停止，工作台退出", flush=True)
+                if HTTPD:
+                    HTTPD.shutdown()
+                return
+        time.sleep(2)
+
+
 class Handler(ev.Handler):
     def do_GET(self):
         p = urlparse(self.path).path
@@ -699,13 +730,17 @@ class Handler(ev.Handler):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8099)
+    ap.add_argument("--follow-dsh", action="store_true", default=True)
+    ap.add_argument("--no-follow-dsh", dest="follow_dsh", action="store_false")
     args = ap.parse_args()
     init_db()
     from http.server import ThreadingHTTPServer
     global HTTPD
     HTTPD = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     ev.HTTPD = HTTPD
-    print(f"[孤独的鱼] http://127.0.0.1:{args.port}/", flush=True)
+    if args.follow_dsh:
+        threading.Thread(target=watch_dsh, daemon=True).start()
+    print(f"[孤独的鱼] http://127.0.0.1:{args.port}/ (follow_dsh={args.follow_dsh})", flush=True)
     HTTPD.serve_forever()
 
 
