@@ -247,6 +247,7 @@ async function loadGithub() {
         <div class="chips" style="margin:10px 0">${checks}</div>
         <div class="actions">
           <button class="ghost" id="gh-refresh">刷新状态</button>
+          <button class="ghost" id="gh-pull" ${!configured ? "disabled" : ""}>从 GitHub 拉取</button>
           <button class="primary" id="gh-pr" ${!configured || pr ? "disabled" : ""}>提交并创建 PR</button>
           <button class="primary" id="gh-merge" ${canMerge ? "" : "disabled"}>合并并发布</button>
         </div>
@@ -255,6 +256,12 @@ async function loadGithub() {
       </div>
       <div class="card panel"><h3>边界</h3><p class="hint">v0.1 只同步 <code>control/policy.json</code> 和 <code>release.json</code>；Canon/评测数据仍在本地。合并前必须 validate 通过；没有通过时按钮不可用。</p></div>`;
     $("#gh-refresh").addEventListener("click", loadGithub);
+    $("#gh-pull")?.addEventListener("click", async () => {
+      try {
+        const r = await api("/api/workbench/github/pull", { method: "POST" });
+        toast(`已拉取 policy v${r.policy_version}`); state.loaded.github = false; await loadGithub(); state.loaded.dashboard = false;
+      } catch (e) { toast("失败：" + e.message); }
+    });
     $("#gh-pr")?.addEventListener("click", async () => {
       try {
         await api("/api/workbench/github/pr", { method: "POST" });
