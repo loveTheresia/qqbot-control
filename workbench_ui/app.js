@@ -35,6 +35,8 @@ async function switchTab(name) {
     if (name === "dashboard") await loadDashboard();
     if (name === "rules") await loadRules();
     if (name === "canon") await loadCanon();
+    if (name === "corpus") await loadCorpus();
+    if (name === "training") await loadTraining();
     if (name === "pipeline") await loadPipeline();
     if (name === "changes") await loadChanges();
     if (name === "release") await loadRelease();
@@ -42,6 +44,41 @@ async function switchTab(name) {
     if (name === "params") await loadParams();
     if (name === "schedule") await loadSchedule();
     if (name === "persona") await loadPersona();
+  }
+}
+
+async function loadQQStatus() {
+  const el = $("#qq-widget");
+  if (!el) return;
+  try {
+    const d = await api("/api/workbench/qq/status");
+    const label = d.state === "online" ? "已登录" : d.state === "qr" ? "等待扫码" : "离线";
+    const color = d.state === "online" ? "good" : d.state === "qr" ? "warn" : "bad";
+    const qr = d.state === "qr" && d.qr_mtime
+      ? `<div class="qr-box"><img src="${esc(d.qr_url)}" alt="QQ 登录二维码"><div class="hint">二维码约 1~2 分钟有效；过期点右侧刷新。</div></div>`
+      : "";
+    const last = (d.last || []).slice(-2).map(x => `<div class="sub">${esc(x)}</div>`).join("");
+    el.innerHTML = `
+      <div class="qq-head">
+        <div><h3>QQ / NapCat</h3><span class="dot ${color}"></span><b>${label}</b>
+          <span class="muted">${d.nickname ? esc(d.nickname) + " · " : ""}${esc(d.account || "")}</span></div>
+        <button class="ghost" id="qq-refresh" ${d.state === "online" ? "disabled" : ""}>刷新二维码</button>
+      </div>
+      <div class="chips" style="margin-top:8px">
+        <span class="chip ${d.http ? "good" : ""}">HTTP 3000 ${d.http ? "开" : "关"}</span>
+        <span class="chip ${d.ws ? "good" : ""}">WS 3001 ${d.ws ? "开" : "关"}</span>
+        <span class="chip ${d.webui ? "good" : ""}">NapCat 6099 ${d.webui ? "开" : "关"}</span>
+      </div>
+      ${qr}
+      <div class="last">${last}</div>`;
+    $("#qq-refresh")?.addEventListener("click", async () => {
+      try {
+        await api("/api/workbench/qq/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        toast("正在生成新二维码，约 10~20 秒"); setTimeout(loadQQStatus, 3000);
+      } catch (e) { toast("刷新失败：" + e.message); }
+    });
+  } catch (e) {
+    el.innerHTML = `<h3>QQ / NapCat</h3><div class="empty">读取失败：${esc(e.message)}</div>`;
   }
 }
 
@@ -57,6 +94,7 @@ async function loadDashboard() {
       `<div class="chip">#${x.id} ${esc(x.label)}${x.note ? " · " + esc(x.note) : ""}</div>`).join("")
       || `<div class="empty">还没有评测记录</div>`;
     $("#tab-dashboard").innerHTML = `
+      <div id="qq-widget" class="card qq-widget"><h3>QQ / NapCat</h3><div class="muted">读取状态中…</div></div>
       <div class="guide">
         <b>正确顺序：</b><span>① 看评测/问题</span> → <span>② 开变更单</span> → <span>③ 只改规则或 Canon</span> → <span>④ 回归评测</span> → <span>⑤ GitHub 合并</span> → <span>⑥ 观察/回滚</span>。
         <br><b>一次只改一个方面</b>：不要同一轮既改规则又改 Canon；发布后观察 1~2 天，再动下一项。
@@ -69,7 +107,7 @@ async function loadDashboard() {
       </div>
       <div class="grid" style="margin-top:13px">
         <div class="card kpi link-card" data-go="canon"><b>${d.canon}</b><span>Canon 条目 · 去录入 →</span><small>先录 3~5 条真正会聊到的</small></div>
-        <div class="card kpi link-card" data-go="pipeline"><b>${d.corpus}</b><span>语料条目</span><small>已核实才注入</small></div>
+        <div class="card kpi link-card" data-go="corpus"><b>${d.corpus}</b><span>语料条目 · 去管理 →</span><small>已核实才注入</small></div>
         <div class="card kpi link-card" data-go="release"><b>${r.policy_version ?? "—"}</b><span>当前 policy 版本 · 看发布 →</span><small>${esc(r.note || "")}</small></div>
         <div class="card kpi link-card" data-go="changes"><b>${d.changes}</b><span>未发布变更 · 去记录 →</span><small>一次只推一个</small></div>
       </div>
@@ -83,6 +121,8 @@ async function loadDashboard() {
       </div>`;
     $$("[data-go]").forEach(el => el.addEventListener("click", () => switchTab(el.dataset.go)));
     $$("[data-href]").forEach(el => el.addEventListener("click", () => { window.location.href = el.dataset.href; }));
+    loadQQStatus();
+    if (!window.qqTimer) window.qqTimer = setInterval(loadQQStatus, 5000);
   } catch (e) { $("#tab-dashboard").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
 }
 
@@ -341,6 +381,82 @@ async function loadSchedule() {
       } catch (err) { toast("失败：" + err.message); }
     });
   } catch (e) { $("#tab-schedule").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+}
+
+
+async function loadCorpus() {
+  setLoading("#tab-corpus");
+  try {
+    const d = await api("/api/workbench/corpus");
+    const rows = (d.corpus || []).map(c => `
+      <tr><td><b>${esc(c.text)}</b><div class="sub">${esc(c.source || "")} · ${esc(c.kind || "style")}</div></td>
+      <td>${esc(c.meaning || "")}<div class="sub">${esc(c.trigger || "")}</div></td>
+      <td>${esc(c.tags || "")}</td><td>${badge(c.status)}${c.verified ? " ✓" : ""}</td>
+      <td><button class="mini" data-corpus-status="${c.id}" data-status="${c.status === "active" || c.status === "approved" ? "draft" : "active"}">${c.status === "active" || c.status === "approved" ? "撤回" : "审核通过"}</button></td></tr>`).join("")
+      || `<tr><td colspan="5" class="empty">还没有语料。先录一条梗/说法。</td></tr>`;
+    $("#tab-corpus").innerHTML = `
+      <div class="guide">
+        <b>语料是“怎么说”，Canon 是“知道什么”。</b>语料只学说法/梗，不改人格和立场；
+        审核通过 + verified 后才会被群聊检索注入。
+      </div>
+      <div class="card">
+        <div class="panel-head"><h2>新建语料</h2><span class="muted">手动录入</span></div>
+        <form id="corpus-form" class="form-grid">
+          <div class="wide"><label>原句 / 说法</label><input name="text" required maxlength="500" placeholder="这波属实是绷不住了"></div>
+          <div><label>来源</label><input name="source" maxlength="60" placeholder="群聊 / 作品A"></div>
+          <div><label>标签</label><input name="tags" maxlength="200" placeholder="吐槽,游戏"></div>
+          <div class="wide"><label>意思</label><input name="meaning" maxlength="300" placeholder="遇到离谱事时表示忍不住笑/无语"></div>
+          <div class="wide"><label>用法 / 触发</label><input name="trigger" maxlength="160" placeholder="吐槽、看比赛翻车时"></div>
+          <div class="wide"><label>例句</label><input name="examples" maxlength="500" placeholder="这操作属实绷不住了"></div>
+          <div class="wide actions"><button class="primary" type="submit">添加语料（draft）</button><span class="hint">先 draft，审核通过后才注入。</span></div>
+        </form>
+        <table class="table" style="margin-top:12px"><thead><tr><th>语料</th><th>意思 / 用法</th><th>标签</th><th>状态</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+      </div>`;
+    $("#corpus-form").addEventListener("submit", async (e) => {
+      e.preventDefault(); const f = new FormData(e.target);
+      try {
+        await api("/api/workbench/corpus", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(f)) });
+        toast("语料已添加"); state.loaded.corpus = false; await loadCorpus();
+      } catch (err) { toast("失败：" + err.message); }
+    });
+    $$("[data-corpus-status]").forEach(b => b.addEventListener("click", async () => {
+      try {
+        await api("/api/workbench/corpus/status", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: Number(b.dataset.corpusStatus), status: b.dataset.status }) });
+        toast("语料状态已更新"); state.loaded.corpus = false; await loadCorpus();
+      } catch (err) { toast("失败：" + err.message); }
+    }));
+  } catch (e) { $("#tab-corpus").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+}
+
+async function loadTraining() {
+  setLoading("#tab-training");
+  try {
+    const d = await api("/api/workbench/training");
+    const runs = (d.runs || []).map(r => `<tr><td>#${r.id}</td><td>Canon ${r.canon_count} / 语料 ${r.corpus_count} / 评测 ${r.eval_count}</td><td><code>${esc(r.package_path)}</code></td><td>${badge(r.status)}</td></tr>`).join("")
+      || `<tr><td colspan="4" class="empty">还没有训练材料包。</td></tr>`;
+    $("#tab-training").innerHTML = `
+      <div class="guide">
+        <b>统一提交：</b>把已审核通过的 Canon、已验证的语料、已提交的评测批次打成一个训练材料包。
+        <br><b>注意：</b>这一步不会更新模型权重；它生成可审计的训练材料，真正的 DPO/LoRA 后续再做。
+      </div>
+      <div class="grid">
+        <div class="card kpi"><b>${d.canon}</b><span>已通过 Canon</span></div>
+        <div class="card kpi"><b>${d.corpus}</b><span>已验证语料</span></div>
+        <div class="card kpi"><b>${d.eval}</b><span>已提交评测批次</span></div>
+        <div class="card kpi"><b>${(d.runs || []).length}</b><span>历史材料包</span></div>
+      </div>
+      <div class="card panel"><div class="panel-head"><h2>提交训练材料</h2>
+        <button class="primary" id="submit-training">统一提交</button></div>
+        <p class="hint">提交后生成 data/train/package-*.json；不会改变线上人格或模型权重。</p></div>
+      <div class="card panel"><h3>历史材料包</h3><table class="table"><thead><tr><th>#</th><th>内容</th><th>路径</th><th>状态</th></tr></thead><tbody>${runs}</tbody></table></div>`;
+    $("#submit-training").addEventListener("click", async () => {
+      if (!confirm("统一提交训练材料？\n\n只生成材料包，不更新模型权重；Canon/语料审核状态不会被撤销。")) return;
+      try {
+        const r = await api("/api/workbench/training/submit", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        toast(`已生成材料包：${r.path}`); state.loaded.training = false; await loadTraining();
+      } catch (e) { toast("失败：" + e.message); }
+    });
+  } catch (e) { $("#tab-training").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
 }
 
 async function loadParams() {
