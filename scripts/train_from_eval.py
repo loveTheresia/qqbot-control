@@ -27,8 +27,9 @@ def rows() -> list[dict]:
     con.row_factory = sqlite3.Row
     data = con.execute(
         "SELECT e.*, datetime(g.ts, 'unixepoch', 'localtime') AS msg_time "
-        "FROM eval_cases e LEFT JOIN group_log g ON g.id=e.src_id "
-        "WHERE e.status='labeled' ORDER BY g.ts, e.id"
+        "FROM eval_cases e JOIN eval_batches b ON b.id=e.batch_id "
+        "LEFT JOIN group_log g ON g.id=e.src_id "
+        "WHERE e.status='labeled' AND b.status='submitted' ORDER BY g.ts, e.id"
     ).fetchall()
     out = []
     for r in data:
@@ -45,7 +46,7 @@ def rows() -> list[dict]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--min-labels", type=int, default=20)
+    ap.add_argument("--min-labels", type=int, default=1)
     args = ap.parse_args()
     data = rows()
     if len(data) < args.min_labels:
@@ -142,6 +143,10 @@ def main() -> int:
         "这批先做规则校准 + 偏好数据；等积累 300~500 条、覆盖新节奏上线后的样本，再考虑 DPO/LoRA。",
     ]
     (OUT / "training-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with sqlite3.connect(DB) as c:
+        c.execute("UPDATE eval_batches SET status='trained', trained_at=? WHERE status='submitted'",
+                  (int(time.time()),))
+        c.commit()
     print(f"[ok] labels={len(data)} report={OUT / 'training-report.md'}")
     print(f"[ok] preferences={OUT / 'preferences.jsonl'}")
     return 0

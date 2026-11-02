@@ -677,8 +677,14 @@ class Store:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, gid INTEGER, conv TEXT,
                 uid INTEGER, nickname TEXT, case_type TEXT DEFAULT 'reply',
                 context TEXT, trigger TEXT, reply TEXT, src_id INTEGER UNIQUE,
+                batch_id INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'pending', label TEXT, should_reply TEXT,
                 note TEXT, created_at INTEGER, labeled_at INTEGER);
+            CREATE TABLE IF NOT EXISTS eval_batches(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT UNIQUE,
+                status TEXT DEFAULT 'open', total INTEGER DEFAULT 0,
+                labeled INTEGER DEFAULT 0, created_at INTEGER,
+                submitted_at INTEGER, trained_at INTEGER);
             CREATE INDEX IF NOT EXISTS idx_eval_status ON eval_cases(status, id);
             """
         )
@@ -720,6 +726,25 @@ class Store:
                 self.db.execute("ALTER TABLE style_items ADD COLUMN verified INTEGER DEFAULT 0")
             if "source" not in scols:
                 self.db.execute("ALTER TABLE style_items ADD COLUMN source TEXT")
+        except Exception:
+            pass
+        try:
+            ecols = {row[1] for row in self.db.execute("PRAGMA table_info(eval_cases)")}
+            if "batch_id" not in ecols:
+                self.db.execute("ALTER TABLE eval_cases ADD COLUMN batch_id INTEGER DEFAULT 0")
+            # 旧数据归入 legacy 批次；已用于上次训练，标记 trained
+            n = self.db.execute("SELECT COUNT(*) FROM eval_batches").fetchone()[0]
+            if n == 0:
+                cur = self.db.execute(
+                    "INSERT INTO eval_batches(day, status, total, labeled, created_at, trained_at) "
+                    "VALUES('legacy', 'trained', 0, 0, ?, ?)",
+                    (int(time.time()), int(time.time())))
+                bid = cur.lastrowid
+                self.db.execute("UPDATE eval_cases SET batch_id=? WHERE batch_id IS NULL OR batch_id=0", (bid,))
+                self.db.execute(
+                    "UPDATE eval_batches SET total=(SELECT COUNT(*) FROM eval_cases WHERE batch_id=?), "
+                    "labeled=(SELECT COUNT(*) FROM eval_cases WHERE batch_id=? AND status IN ('labeled','skipped')) "
+                    "WHERE id=?", (bid, bid, bid))
         except Exception:
             pass
 
@@ -1472,14 +1497,14 @@ class Store:
     # ---- 人工评测 / 抽检 -----------------------------------------------
     def add_eval_case(self, gid: int, conv: str, uid: int, nickname: str,
                       case_type: str, context: list[dict], trigger: str,
-                      reply: str, src_id: int) -> int:
+                      reply: str, src_id: int, batch_id: int = 0) -> int:
         cur = self.db.execute(
             "INSERT OR IGNORE INTO eval_cases(gid, conv, uid, nickname, case_type, "
-            "context, trigger, reply, src_id, status, created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?, 'pending', ?)",
+            "context, trigger, reply, src_id, batch_id, status, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?, 'pending', ?)",
             (gid, conv, uid, (nickname or "")[:40], case_type,
              json.dumps(context, ensure_ascii=False), trigger[:300], reply[:500],
-             src_id, int(time.time())),
+             src_id, batch_id, int(time.time())),
         )
         self.db.commit()
         return cur.lastrowid if cur.rowcount else 0
@@ -3808,39 +3833,88 @@ def backfill_self_memory() -> None:
         log_line(f"[memory] self backfill 失败 {e}")
 
 
+def _get_batch(day: str) -> int:
+    row = STORE.db.execute("SELECT id FROM eval_batches WHERE day=?", (day,)).fetchone()
+    if row:
+        return int(row[0])
+    cur = STORE.db.execute(
+        "INSERT INTO eval_batches(day, status, total, labeled, created_at) "
+        "VALUES(?, 'open', 0, 0, ?)", (day, int(time.time())))
+    STORE.db.commit()
+    return int(cur.lastrowid)
+
+
+def refresh_eval_batch(bid: int) -> None:
+    total = STORE.db.execute("SELECT COUNT(*) FROM eval_cases WHERE batch_id=?", (bid,)).fetchone()[0]
+    labeled = STORE.db.execute(
+        "SELECT COUNT(*) FROM eval_cases WHERE batch_id=? AND status IN ('labeled','skipped')",
+        (bid,)).fetchone()[0]
+    status_row = STORE.db.execute("SELECT status FROM eval_batches WHERE id=?", (bid,)).fetchone()
+    status = status_row[0] if status_row else "open"
+    if total == 0 and status == "open":
+        status = "empty"
+    STORE.db.execute("UPDATE eval_batches SET total=?, labeled=?, status=? WHERE id=?",
+                     (total, labeled, status, bid))
+    STORE.db.commit()
+
+
+def _add_eval_from_reply(mid: int, gid: int, uid: int, nick: str, reply: str,
+                         batch_id: int) -> int:
+    prev = STORE.db.execute(
+        "SELECT id, uid, nickname, content FROM group_log "
+        "WHERE gid=? AND role='user' AND id<? ORDER BY id DESC LIMIT 1",
+        (gid, mid)).fetchone()
+    if not prev:
+        return 0
+    ctx_rows = STORE.db.execute(
+        "SELECT role, uid, nickname, content FROM group_log "
+        "WHERE gid=? AND id<? ORDER BY id DESC LIMIT 8", (gid, mid)).fetchall()
+    ctx = [{"role": r[0], "uid": r[1], "nickname": r[2], "text": (r[3] or "")[:200]}
+           for r in reversed(ctx_rows)]
+    return STORE.add_eval_case(gid, f"group:{gid}:{uid}", uid, nick or "", "reply", ctx,
+                               prev[3] or "", reply or "", mid, batch_id)
+
+
+def collect_eval_day(day: str, limit: int = 200) -> dict:
+    """抓取指定自然日（Asia/Shanghai）她的群回复，追加到当天的评测批次。"""
+    start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=TZ)
+    end = start + timedelta(days=1)
+    bid = _get_batch(day)
+    row = STORE.db.execute("SELECT status FROM eval_batches WHERE id=?", (bid,)).fetchone()
+    if row and row[0] in ("submitted", "trained"):
+        return {"day": day, "batch_id": bid, "added": 0, "status": row[0]}
+    rows = STORE.db.execute(
+        "SELECT id, gid, uid, nickname, content FROM group_log "
+        "WHERE role='assistant' AND ts>=? AND ts<? ORDER BY id DESC LIMIT ?",
+        (int(start.timestamp()), int(end.timestamp()), limit)).fetchall()
+    added = 0
+    for mid, gid, uid, nick, reply in rows:
+        if _add_eval_from_reply(mid, gid, uid, nick or "", reply or "", bid):
+            added += 1
+    refresh_eval_batch(bid)
+    status = STORE.db.execute("SELECT status FROM eval_batches WHERE id=?", (bid,)).fetchone()[0]
+    log_line(f"[eval] day={day} batch={bid} added={added} status={status}")
+    return {"day": day, "batch_id": bid, "added": added, "status": status}
+
+
 def collect_eval_cases(days: int = 7, limit: int = 40) -> int:
-    """从最近的群聊回复里采样人工抽检用例。"""
+    """手动采样：单独一个 manual 批次，方便一次评完提交。"""
+    day = "manual-" + now().strftime("%Y%m%d-%H%M%S")
+    bid = _get_batch(day)
     since = int(time.time()) - max(1, days) * 86400
     rows = STORE.db.execute(
-        "SELECT id, gid, uid, nickname, content, ts FROM group_log "
+        "SELECT id, gid, uid, nickname, content FROM group_log "
         "WHERE role='assistant' AND ts>=? ORDER BY id DESC LIMIT ?",
-        (since, max(1, limit * 2)),
-    ).fetchall()
+        (since, max(1, limit * 2))).fetchall()
     added = 0
-    for mid, gid, uid, nick, reply, ts in rows:
-        prev = STORE.db.execute(
-            "SELECT id, uid, nickname, content FROM group_log "
-            "WHERE gid=? AND role='user' AND id<? ORDER BY id DESC LIMIT 1",
-            (gid, mid),
-        ).fetchone()
-        if not prev:
-            continue
-        ctx_rows = STORE.db.execute(
-            "SELECT role, uid, nickname, content FROM group_log "
-            "WHERE gid=? AND id<? ORDER BY id DESC LIMIT 8", (gid, mid)
-        ).fetchall()
-        ctx = [{"role": r[0], "uid": r[1], "nickname": r[2], "text": (r[3] or "")[:200]}
-               for r in reversed(ctx_rows)]
-        conv = f"group:{gid}:{uid}"
-        cid = STORE.add_eval_case(gid, conv, uid, nick or "", "reply", ctx,
-                                  prev[3] or "", reply or "", mid)
-        if cid:
+    for mid, gid, uid, nick, reply in rows:
+        if _add_eval_from_reply(mid, gid, uid, nick or "", reply or "", bid):
             added += 1
         if added >= limit:
             break
-    log_line(f"[eval] collect days={days} added={added}")
+    refresh_eval_batch(bid)
+    log_line(f"[eval] manual batch={bid} added={added}")
     return added
-
 
 CONTROL_SYNC_TASK: asyncio.Task | None = None
 APPLIED_FILE = CONTROL_DIR / "applied.json"
@@ -3914,6 +3988,27 @@ async def control_sync_loop() -> None:
         await asyncio.sleep(max(60, CONTROL_SYNC_SEC))
 
 
+EVAL_TASK: asyncio.Task | None = None
+
+
+async def nightly_eval_loop() -> None:
+    """每天 00:00 抓取昨天的群回复，追加到评测批次。"""
+    try:
+        y = (now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        await asyncio.to_thread(collect_eval_day, y)
+    except Exception as e:
+        log_line(f"[eval] catch-up failed {e}")
+    while True:
+        dt = now()
+        nxt = (dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        await asyncio.sleep(max(60, (nxt - dt).total_seconds()))
+        day = (nxt - timedelta(days=1)).strftime("%Y-%m-%d")
+        try:
+            await asyncio.to_thread(collect_eval_day, day)
+        except Exception as e:
+            log_line(f"[eval] nightly failed {e}")
+
+
 NIGHTLY_TASK: asyncio.Task | None = None
 
 
@@ -3970,9 +4065,10 @@ async def nightly_style_loop() -> None:
 
 
 async def main_run() -> None:
-    global NIGHTLY_TASK, CONTROL_SYNC_TASK
+    global NIGHTLY_TASK, CONTROL_SYNC_TASK, EVAL_TASK
     NIGHTLY_TASK = asyncio.create_task(nightly_style_loop())
     CONTROL_SYNC_TASK = asyncio.create_task(control_sync_loop())
+    EVAL_TASK = asyncio.create_task(nightly_eval_loop())
     await BOT.run()
 
 
