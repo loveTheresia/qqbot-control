@@ -18,7 +18,6 @@
     <div class="progress-wrap">
       <div class="progress-text"><span id="done">0</span> / <span id="total">0</span> 已评</div>
       <div class="progress"><i id="bar"></i></div>
-      <button class="finish" id="finish">结束服务并训练</button>
     </div>
   </header>
 
@@ -65,9 +64,11 @@
 
       <div class="empty" id="empty" hidden>
         <div class="empty-mark">✓</div>
-        <h2>这一批评完了</h2>
-        <p>可以导出 CSV，或者回 QQ 发 <code>/评测 采集 7</code> 再采一批。</p>
-        <a class="btn" href="/api/export.csv">导出 labels.csv</a>
+        <h2 id="empty-title">本批已评完</h2>
+        <p id="empty-text">每天 00:00 会自动采集前一天的群聊回复。</p>
+        <button class="btn" id="submit-batch" hidden>提交本批并训练</button>
+        <button class="btn ghost-btn" id="collect-batch">采集昨天</button>
+        <a class="btn ghost-btn" href="/api/export.csv">导出 labels.csv</a>
       </div>
 
       <div class="error" id="error" hidden></div>
@@ -100,16 +101,6 @@
       </section>
     </aside>
   </main>
-
-  <div class="finished-screen" id="finished" hidden>
-    <div class="finish-card">
-      <div class="empty-mark">✓</div>
-      <h2>评测结束，开始整理训练材料</h2>
-      <p>服务已停止。训练报告生成在：</p>
-      <code>data/eval/training-report.md</code>
-      <p class="muted">这次不是微调模型，而是把你的标签整理成偏好数据和规则建议；39 条不足以做可靠的 fine-tune。</p>
-    </div>
-  </div>
 
   <div class="toast" id="toast"></div>
   <script src="/app.js"></script>

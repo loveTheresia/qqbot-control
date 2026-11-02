@@ -587,6 +587,10 @@ class Handler(ev.Handler):
 
     def do_POST(self):
         p = urlparse(self.path).path
+        # 评测 API（/api/label、/api/submit、/api/finish）交给 eval Handler 自己读 body；
+        # 这里先读再 super() 会卡住，因为它会再读一次空的 body。
+        if not p.startswith("/api/workbench/"):
+            return super().do_POST()
         try:
             n = int(self.headers.get("Content-Length", "0"))
             data = json.loads(self.rfile.read(n) or b"{}")
@@ -690,6 +694,9 @@ class Handler(ev.Handler):
                 self._json({"ok": True, "changes": changes()})
             elif p == "/api/workbench/github/pr":
                 self._json(github_create_pr())
+            elif p == "/api/workbench/eval/collect":
+                day = (BOT.now() - BOT.timedelta(days=1)).strftime("%Y-%m-%d")
+                self._json({"ok": True, **BOT.collect_eval_day(day)})
             elif p == "/api/workbench/github/pull":
                 self._json(github_pull())
             elif p == "/api/workbench/github/merge":

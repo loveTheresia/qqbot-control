@@ -51,16 +51,27 @@ def stats() -> dict:
         total = c.execute("SELECT COUNT(*) FROM eval_cases").fetchone()[0]
         pending = c.execute(
             "SELECT COUNT(*) FROM eval_cases WHERE status='pending'").fetchone()[0]
+        open_batches = [dict(r) for r in c.execute(
+            "SELECT id, day, total, labeled, status FROM eval_batches "
+            "WHERE status='open' AND total>0 ORDER BY id DESC").fetchall()]
+        submitted = [dict(r) for r in c.execute(
+            "SELECT id, day, total, labeled, status FROM eval_batches "
+            "WHERE status='submitted' ORDER BY id DESC").fetchall()]
         labels = [{"key": r["label"], "name": LABELS.get(r["label"], (r["label"], ""))[0],
                    "count": r["n"]} for r in rows if r["status"] == "labeled" and r["label"]]
-    return {"total": total, "pending": pending, "done": total - pending, "labels": labels}
+    return {"total": total, "pending": pending, "done": total - pending, "labels": labels,
+            "open_batches": open_batches,
+            "open_batch": open_batches[0] if open_batches else None,
+            "submitted_batches": submitted,
+            "completed": pending == 0 and not open_batches and not submitted}
 
 
 def next_case() -> dict | None:
     with conn() as c:
         r = c.execute(
-            "SELECT id, gid, uid, nickname, case_type, context, trigger, reply "
-            "FROM eval_cases WHERE status='pending' ORDER BY id LIMIT 1"
+            "SELECT e.id, e.gid, e.uid, e.nickname, e.case_type, e.context, e.trigger, e.reply "
+            "FROM eval_cases e JOIN eval_batches b ON b.id=e.batch_id "
+            "WHERE e.status='pending' AND b.status='open' ORDER BY e.id LIMIT 1"
         ).fetchone()
     if not r:
         return None
@@ -148,26 +159,40 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self._json({"error": "bad json"}, 400)
             return
-        if p == "/api/finish":
-            global FINISHING, HTTPD
-            if FINISHING:
-                self._json({"error": "already finishing"}, 409)
-                return
-            FINISHING = True
-            st = stats()
-            marker = ROOT / "data" / "eval" / "finished.json"
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(json.dumps({"finished_at": time.strftime("%F %T"),
-                                          "stats": st}, ensure_ascii=False, indent=2),
-                              encoding="utf-8")
+        if p == "/api/submit":
+            with conn() as c:
+                open_batches = c.execute(
+                    "SELECT id, day FROM eval_batches WHERE status='open' AND total>0 "
+                    "ORDER BY id DESC").fetchall()
+                if not open_batches:
+                    self._json({"error": "当前没有待提交的评测批次"}, 400)
+                    return
+                for b in open_batches:
+                    n = c.execute("SELECT COUNT(*) FROM eval_cases "
+                                  "WHERE batch_id=? AND status='pending'", (b["id"],)).fetchone()[0]
+                    if n:
+                        self._json({"error": f"{b['day']} 还有 {n} 条未评，不能提交"}, 400)
+                        return
+                now_ts = int(time.time())
+                for b in open_batches:
+                    c.execute("UPDATE eval_batches SET status='submitted', submitted_at=? "
+                              "WHERE id=?", (now_ts, b["id"]))
             log = open(ROOT / "logs" / "eval_train.log", "a", encoding="utf-8")
             subprocess.Popen(
                 [sys.executable, str(ROOT / "scripts" / "train_from_eval.py")],
                 cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-            self._json({"ok": True, "stats": st,
-                        "report": str(ROOT / "data" / "eval" / "training-report.md")})
+            self._json({"ok": True, "message": "已提交，训练材料生成中",
+                        "stats": stats()})
+            return
+        if p == "/api/finish":
+            global FINISHING, HTTPD
+            if FINISHING:
+                self._json({"error": "already finishing"}, 409)
+                return
+            FINISHING = True
+            self._json({"ok": True})
             threading.Timer(1.0, HTTPD.shutdown).start()
             return
         if p != "/api/label":
@@ -187,6 +212,11 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute(
                     "UPDATE eval_cases SET status=?, label=?, should_reply=?, note=?, "
                     "labeled_at=? WHERE id=?", (status, label, should, note, int(time.time()), cid)
+                )
+                c.execute(
+                    "UPDATE eval_batches SET labeled=(SELECT COUNT(*) FROM eval_cases "
+                    "WHERE batch_id=eval_batches.id AND status IN ('labeled','skipped')) "
+                    "WHERE id=(SELECT batch_id FROM eval_cases WHERE id=?)", (cid,)
                 )
             self._json({"ok": True, "stats": stats(), "next": next_case()})
         except Exception as e:

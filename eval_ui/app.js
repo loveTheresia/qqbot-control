@@ -3,7 +3,7 @@ const LABELS = {
   human_like: "像人", ok: "还行", cold: "冷淡",
   hallucinated: "不懂装懂", should_not: "不该回", skip: "跳过",
 };
-const state = { case: null, busy: false };
+const state = { case: null, stats: null, busy: false };
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -68,6 +68,32 @@ function renderRecent(list) {
   }
 }
 
+function renderEmpty(s) {
+  s = s || state.stats || {};
+  const title = $("empty-title");
+  const text = $("empty-text");
+  const submit = $("submit-batch");
+  if (!title || !text) return;
+  const open = s.open_batch;
+  if (s.pending > 0) {
+    title.textContent = "还有待评内容";
+    text.textContent = `还有 ${s.pending} 条没评完，刷新一下继续。`;
+    submit.hidden = true;
+  } else if ((s.submitted_batches || []).length) {
+    title.textContent = "已提交，训练中";
+    text.textContent = "这批结果已经参与训练材料生成；服务继续运行，不需要停。";
+    submit.hidden = true;
+  } else if (open) {
+    title.textContent = "本批已评完，待提交";
+    text.textContent = `${open.day || "本批"}：${open.labeled}/${open.total} 已评。只有点“提交本批并训练”后，这批结果才会参与训练。`;
+    submit.hidden = false;
+  } else {
+    title.textContent = "今天没有可测评内容";
+    text.textContent = "每天 00:00 会自动采集前一天的群聊回复；也可以手动采集昨天。";
+    submit.hidden = true;
+  }
+}
+
 function renderCase(c) {
   state.case = c;
   const empty = $("empty");
@@ -76,6 +102,7 @@ function renderCase(c) {
     card.hidden = true;
     empty.hidden = false;
     $("loading").hidden = true;
+    renderEmpty(state.stats);
     return;
   }
   empty.hidden = true;
@@ -108,6 +135,7 @@ function renderCase(c) {
 async function load() {
   try {
     const data = await api("/api/next");
+    state.stats = data.stats;
     renderStats(data.stats);
     renderCase(data.case);
     const rec = await api("/api/recent");
@@ -132,6 +160,7 @@ async function submit(label) {
       }),
     });
     toast(`已记录：${LABELS[label] || label}`);
+    state.stats = data.stats;
     renderStats(data.stats);
     renderCase(data.next);
     const rec = await api("/api/recent");
@@ -163,18 +192,28 @@ $("refresh").addEventListener("click", async () => {
   renderStats(rec.stats);
 });
 
-$("finish").addEventListener("click", async () => {
-  if (!confirm("结束本次评测并停止 8099 服务？\n标签已经写入数据库，训练材料会生成在 data/eval/。")) return;
-  $("finish").disabled = true;
+$("submit-batch").addEventListener("click", async () => {
+  if (!confirm("提交本批测评？\n\n提交后这批结果才会参与训练；服务不会停止。")) return;
+  $("submit-batch").disabled = true;
   try {
-    await api("/api/finish", { method: "POST" });
-    document.querySelector("main").style.display = "none";
-    document.querySelector(".topbar").style.display = "none";
-    $("finished").hidden = false;
+    await api("/api/submit", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    toast("已提交，训练材料生成中");
+    $("empty-title").textContent = "本批已提交";
+    $("empty-text").textContent = "训练材料正在生成；服务继续运行。";
+    $("submit-batch").hidden = true;
   } catch (e) {
-    showError("结束失败：" + e.message);
-    $("finish").disabled = false;
+    showError("提交失败：" + e.message);
+  } finally {
+    $("submit-batch").disabled = false;
   }
+});
+
+$("collect-batch").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/workbench/eval/collect", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    toast(`已采集 ${r.added ?? 0} 条`);
+    setTimeout(load, 600);
+  } catch (e) { showError("采集失败：" + e.message); }
 });
 
 load();
