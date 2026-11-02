@@ -14,7 +14,10 @@ import os
 import importlib.util
 import json
 import re
+import shutil
+import socket
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -69,6 +72,10 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS audit_log(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             actor TEXT, action TEXT, target TEXT, detail TEXT, created_at INTEGER);
+        CREATE TABLE IF NOT EXISTS training_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT DEFAULT 'packaged',
+            canon_count INTEGER, corpus_count INTEGER, eval_count INTEGER,
+            package_path TEXT, created_at INTEGER);
         """)
         # 从 control/policy.json 同步初始规则（仅空表时）
         n = c.execute("SELECT COUNT(*) FROM policy_rules").fetchone()[0]
@@ -388,6 +395,193 @@ def persona_info() -> dict:
     }
 
 
+QQ_QR = ROOT / "run" / "qrcode-big.png"
+
+
+def sync_qq_qr() -> None:
+    """把 NapCat cache 里最新的二维码同步到工作台展示文件。"""
+    try:
+        cache = next((ROOT / "qq").glob("**/cache/qrcode.png"), None)
+        if not cache or not cache.exists():
+            return
+        if QQ_QR.exists() and cache.stat().st_mtime <= QQ_QR.stat().st_mtime:
+            return
+        ROOT.joinpath("run").mkdir(exist_ok=True)
+        small = ROOT / "run" / "qrcode.png"
+        shutil.copyfile(cache, small)
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "qr_upscale.py"),
+                        str(small), str(QQ_QR)], timeout=15,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _port_open(port: int) -> bool:
+    for host in ("127.0.0.1", "::1"):
+        try:
+            with socket.create_connection((host, port), timeout=0.4):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _qq_config() -> dict:
+    for p in (ROOT / "qq").glob("**/onebot11_*.json"):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            for server in d.get("network", {}).get("httpServers", []):
+                if server.get("enable"):
+                    return server
+        except Exception:
+            pass
+    return {}
+
+
+def _login_info() -> dict | None:
+    cfg = _qq_config()
+    if not cfg:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"http://{cfg.get('host', '127.0.0.1')}:{cfg.get('port', 3000)}/get_login_info",
+            headers={"Authorization": f"Bearer {cfg.get('token', '')}"})
+        with urllib.request.urlopen(req, timeout=2) as r:
+            d = json.loads(r.read().decode())
+        if d.get("retcode") == 0:
+            return d.get("data") or {}
+    except Exception:
+        pass
+    return None
+
+
+def qq_status() -> dict:
+    sync_qq_qr()
+    http_up = _port_open(3000)
+    ws_up = _port_open(3001)
+    webui_up = _port_open(6099)
+    info = _login_info() if http_up or ws_up else None
+    try:
+        qr_mtime = QQ_QR.stat().st_mtime
+        qr_bytes = QQ_QR.stat().st_size
+    except Exception:
+        qr_mtime, qr_bytes = 0, 0
+    try:
+        qq_proc = subprocess.run(["pgrep", "-f", r"^/home/opt/QQBot/qq/opt/QQ/qq( |$)"],
+                                 capture_output=True).returncode == 0
+    except Exception:
+        qq_proc = False
+    if info or ws_up:
+        state = "online"
+    elif qq_proc or webui_up:
+        state = "qr"
+    else:
+        state = "offline"
+    kicks = []
+    try:
+        for line in (ROOT / "logs" / "kicks.log").read_text(encoding="utf-8").splitlines()[-20:]:
+            if "KICK" in line or "LOGIN" in line:
+                kicks.append(line)
+    except Exception:
+        pass
+    cfg = load_env()
+    return {"state": state, "http": http_up, "ws": ws_up, "webui": webui_up,
+            "qq_process": qq_proc, "account": cfg.get("NAPCAT_QUICK_ACCOUNT", ""),
+            "nickname": (info or {}).get("nickname", ""),
+            "user_id": (info or {}).get("user_id", ""),
+            "qr_mtime": int(qr_mtime), "qr_bytes": qr_bytes,
+            "qr_url": f"/qq-qr.png?t={int(qr_mtime)}",
+            "last": kicks[-4:]}
+
+
+def refresh_qq_qr() -> dict:
+    if _port_open(3001) or _login_info():
+        raise RuntimeError("当前已登录，不刷新二维码；需要换号请先退出登录")
+    subprocess.Popen([str(ROOT / "scripts" / "restart-qq-qr.sh")], cwd=str(ROOT),
+                     start_new_session=True,
+                     stdout=open(ROOT / "logs" / "qq-qr.log", "a", encoding="utf-8"),
+                     stderr=subprocess.STDOUT)
+    return {"ok": True, "message": "正在重启 QQ 并生成新二维码，约 10~20 秒"}
+
+
+def corpus_items() -> list[dict]:
+    with conn() as c:
+        rows = c.execute("SELECT id, source, kind, text, meaning, trigger, examples, "
+                         "tags, verified, status, score, created_at FROM corpus ORDER BY id DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_corpus(data: dict) -> dict:
+    text = str(data.get("text", "")).strip()
+    if not text:
+        raise RuntimeError("语料原文不能为空")
+    meaning = str(data.get("meaning", "")).strip()
+    trigger = str(data.get("trigger", "")).strip()
+    examples = str(data.get("examples", "")).strip()
+    tags = str(data.get("tags", "")).strip()
+    source = str(data.get("source", "workbench")).strip() or "workbench"
+    with conn() as c:
+        cur = c.execute(
+            "INSERT INTO corpus(source, kind, text, meaning, trigger, examples, tags, "
+            "verified, score, status, created_at, updated_at) "
+            "VALUES(?, 'style', ?, ?, ?, ?, ?, 0, 0.5, 'draft', ?, ?)",
+            (source[:60], text[:500], meaning[:300], trigger[:160], examples[:500],
+             tags[:200], int(time.time()), int(time.time())))
+        cid = cur.lastrowid
+    audit("add_corpus", str(cid), text[:80])
+    return {"id": cid}
+
+
+def set_corpus_status(cid: int, status: str) -> None:
+    if status not in ("draft", "active", "approved", "retired"):
+        raise RuntimeError("状态不合法")
+    verified = 1 if status in ("active", "approved") else 0
+    with conn() as c:
+        c.execute("UPDATE corpus SET status=?, verified=?, updated_at=? WHERE id=?",
+                  (status, verified, int(time.time()), cid))
+    audit("corpus_status", str(cid), status)
+
+
+def training_info() -> dict:
+    with conn() as c:
+        canon_n = c.execute("SELECT COUNT(*) FROM canon_items WHERE status='approved'").fetchone()[0]
+        corpus_n = c.execute("SELECT COUNT(*) FROM corpus WHERE status IN ('active','approved') AND verified=1").fetchone()[0]
+        eval_n = c.execute("SELECT COUNT(*) FROM eval_batches WHERE status='submitted'").fetchone()[0]
+        runs = [dict(r) for r in c.execute(
+            "SELECT * FROM training_runs ORDER BY id DESC LIMIT 20").fetchall()]
+    return {"canon": canon_n, "corpus": corpus_n, "eval": eval_n,
+            "runs": runs, "note": "提交后生成训练材料包；当前不更新模型权重。"}
+
+
+def submit_training(note: str = "") -> dict:
+    with conn() as c:
+        canon = [dict(r) for r in c.execute(
+            "SELECT id, type, title, source, summary, tags FROM canon_items "
+            "WHERE status='approved' ORDER BY id").fetchall()]
+        corpus = [dict(r) for r in c.execute(
+            "SELECT id, source, text, meaning, trigger, examples, tags FROM corpus "
+            "WHERE status IN ('active','approved') AND verified=1 ORDER BY id").fetchall()]
+        evals = [dict(r) for r in c.execute(
+            "SELECT id, day, total, labeled FROM eval_batches WHERE status='submitted' ORDER BY id").fetchall()]
+        if not canon and not corpus and not evals:
+            raise RuntimeError("没有可提交的训练材料：先审核 Canon / 语料，或提交评测批次")
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        package = {"created_at": ts, "note": note[:200], "canon": canon,
+                   "corpus": corpus, "eval_batches": evals}
+        out = ROOT / "data" / "train"
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"package-{ts}.json"
+        path.write_text(json.dumps(package, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+        c.execute("INSERT INTO training_runs(status, canon_count, corpus_count, eval_count, "
+                  "package_path, created_at) VALUES('packaged',?,?,?,?,?)",
+                  (len(canon), len(corpus), len(evals), str(path), int(time.time())))
+        c.commit()
+    audit("training_package", path.name, f"canon={len(canon)} corpus={len(corpus)} eval={len(evals)}")
+    return {"ok": True, "path": str(path), "canon": len(canon),
+            "corpus": len(corpus), "eval": len(evals)}
+
+
 def audit(action: str, target: str, detail: str = "") -> None:
     with conn() as c:
         c.execute("INSERT INTO audit_log(actor, action, target, detail, created_at) "
@@ -554,6 +748,12 @@ class Handler(ev.Handler):
             self._file(UI / "app.js", "application/javascript; charset=utf-8")
         elif p == "/avatar.jpg":
             self._file(UI / "avatar.jpg", "image/jpeg")
+        elif p == "/qq-qr.png":
+            if QQ_QR.exists():
+                self._send(200, QQ_QR.read_bytes(), "image/jpeg",
+                           {"Cache-Control": "no-store"})
+            else:
+                self._send(404, b"no qr", "text/plain")
         elif p == "/eval":
             self._file(ev.UI / "index.html", "text/html; charset=utf-8")
         elif p == "/api/workbench/dashboard":
@@ -568,6 +768,12 @@ class Handler(ev.Handler):
             self._json(pipeline())
         elif p == "/api/workbench/builtin":
             self._json(builtin_rules())
+        elif p == "/api/workbench/corpus":
+            self._json({"corpus": corpus_items()})
+        elif p == "/api/workbench/training":
+            self._json(training_info())
+        elif p == "/api/workbench/qq/status":
+            self._json(qq_status())
         elif p == "/api/workbench/persona":
             self._json(persona_info())
         elif p == "/api/workbench/schedule":
@@ -694,6 +900,32 @@ class Handler(ev.Handler):
                 self._json({"ok": True, "changes": changes()})
             elif p == "/api/workbench/github/pr":
                 self._json(github_create_pr())
+            elif p == "/api/workbench/corpus":
+                try:
+                    cid = create_corpus(data)
+                    self._json({"ok": True, **cid, "corpus": corpus_items()})
+                except Exception as e:
+                    self._json({"error": str(e)}, 400)
+                return
+            elif p == "/api/workbench/corpus/status":
+                try:
+                    set_corpus_status(int(data.get("id", 0)), str(data.get("status", "draft")))
+                    self._json({"ok": True, "corpus": corpus_items()})
+                except Exception as e:
+                    self._json({"error": str(e)}, 400)
+                return
+            elif p == "/api/workbench/training/submit":
+                try:
+                    self._json(submit_training(str(data.get("note", ""))))
+                except Exception as e:
+                    self._json({"error": str(e)}, 400)
+                return
+            elif p == "/api/workbench/qq/refresh":
+                try:
+                    self._json(refresh_qq_qr())
+                except Exception as e:
+                    self._json({"error": str(e)}, 400)
+                return
             elif p == "/api/workbench/eval/collect":
                 day = (BOT.now() - BOT.timedelta(days=1)).strftime("%Y-%m-%d")
                 self._json({"ok": True, **BOT.collect_eval_day(day)})

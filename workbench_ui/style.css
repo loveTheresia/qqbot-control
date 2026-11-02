@@ -113,3 +113,14 @@ details.card h4 { margin: 14px 0 6px; font-size: 12px; color: var(--muted); }
 #tab-schedule pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.7; background: #f8f5ee; border-radius: 10px; padding: 12px; color: #555b55; }
 #tab-persona pre, #tab-schedule pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.75; background: #f8f5ee; border-radius: 10px; padding: 14px; color: #555b55; max-height: 520px; overflow: auto; }
 #tab-persona .kpi .chip { display: inline-block; margin: 1px; }
+.qq-widget { margin-bottom: 14px; }
+.qq-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.qq-head h3 { margin: 0 0 4px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 5px 0 2px; background: #aaa; }
+.dot.good { background: #2f8f64; }
+.dot.warn { background: #d39a3a; }
+.dot.bad { background: #b34a3f; }
+.qr-box { display: flex; gap: 16px; align-items: center; margin-top: 12px; }
+.qr-box img { width: 190px; height: 190px; border-radius: 12px; border: 1px solid var(--line); background: #fff; }
+.last { margin-top: 8px; border-top: 1px dashed #eee8dc; padding-top: 8px; }
+.last .sub { color: #9a9488; font-size: 11px; line-height: 1.6; }

@@ -1401,7 +1401,7 @@ class Store:
                    "WHERE corpus_fts_v2 MATCH ? AND f.kind=?")
             args: list = [q, kind]
             if verified_only:
-                sql += " AND c.verified=1 AND c.status='active'"
+                sql += " AND c.verified=1 AND c.status IN ('active','approved')"
             sql += " ORDER BY rank LIMIT ?"
             args.append(limit)
             try:
@@ -1428,7 +1428,7 @@ class Store:
                        "OR trigger LIKE ? OR tags LIKE ?)")
                 args = [kind, f"%{term}%", f"%{term}%", f"%{term}%", f"%{term}%"]
                 if verified_only:
-                    sql += " AND verified=1 AND status='active'"
+                    sql += " AND verified=1 AND status IN ('active','approved')"
                 sql += " ORDER BY id DESC LIMIT 20"
                 for r in self.db.execute(sql, args).fetchall():
                     blob = " ".join(str(x or "") for x in r[1:7]).lower()
